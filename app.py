@@ -1,112 +1,48 @@
-from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
-import os
+rom fastapi import FastAPI
+from pydantic import BaseModel
 from openai import OpenAI
-import pinecone
-import datetime
+from pinecone import Pinecone
+import os
 
-# Initialize FastAPI
-app = FastAPI(title="Core Memory API")
+app = FastAPI()
 
-# Load API keys from environment variables
-OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
-PINECONE_API_KEY = os.environ["PINECONE_API_KEY"]
-INDEX_NAME = "core-memory"
+# --- Setup Clients ---
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
+INDEX_NAME = os.getenv("INDEX_NAME", "core-memory")
 
-# Initialize clients
 client = OpenAI(api_key=OPENAI_API_KEY)
-pinecone.init(api_key=PINECONE_API_KEY)
-index = pinecone.Index(INDEX_NAME)
+pc = Pinecone(api_key=PINECONE_API_KEY)
+index = pc.Index(INDEX_NAME)
 
+# --- Request Schema ---
+class SearchRequest(BaseModel):
+    query: str
+    topK: int = 5
 
-@app.get("/")
-def root():
-    return {"status": "Core Memory API is running!"}
+# --- Search Endpoint ---
+@app.post("/searchMemories")
+def search_memories(req: SearchRequest):
+    # Step 1: Embed query
+    embedding = client.embeddings.create(
+        model="text-embedding-3-small",
+        input=req.query
+    ).data[0].embedding
 
+    # Step 2: Query Pinecone
+    results = index.query(
+        vector=embedding,
+        top_k=req.topK,
+        include_metadata=True
+    )
 
-@app.get("/health")
-def health():
-    return {"status": "ok"}
+    # Step 3: Format response
+    memories = [
+        {
+            "text": match["metadata"]["text"],
+            "score": match["score"]
+        }
+        for match in results["matches"]
+    ]
 
-
-@app.post("/store_memory")
-async def store_memory(request: Request):
-    try:
-        data = await request.json()
-        text = data.get("text", "")
-        tags = data.get("tags", [])
-
-        if not text:
-            return JSONResponse(content={"error": "No text provided"}, status_code=400)
-
-        # Create embedding for memory text
-        embedding = client.embeddings.create(
-            model="text-embedding-3-small",
-            input=text
-        ).data[0].embedding
-
-        # Unique ID for this memory
-        memory_id = f"mem_{datetime.datetime.utcnow().isoformat()}"
-
-        # Store in Pinecone
-        index.upsert([
-            {
-                "id": memory_id,
-                "values": embedding,
-                "metadata": {
-                    "text": text,
-                    "tags": tags,
-                    "timestamp": datetime.datetime.utcnow().isoformat()
-                }
-            }
-        ])
-
-        return {"message": "Memory stored successfully", "id": memory_id}
-
-    except Exception as e:
-        return JSONResponse(content={"error": str(e)}, status_code=500)
-
-
-@app.post("/query_memory")
-async def query_memory(request: Request):
-    try:
-        data = await request.json()
-        query = data.get("query", "")
-        top_k = data.get("top_k", 5)
-
-        if not query:
-            return JSONResponse(content={"error": "No query provided"}, status_code=400)
-
-        # Create embedding for the query
-        query_embedding = client.embeddings.create(
-            model="text-embedding-3-small",
-            input=query
-        ).data[0].embedding
-
-        # Query Pinecone index
-        results = index.query(
-            vector=query_embedding,
-            top_k=top_k,
-            include_metadata=True
-        )
-
-        matches = results.get("matches", [])
-
-        if not matches:
-            return {"message": "No relevant memories found."}
-
-        # Format results
-        formatted = [
-            {
-                "text": m["metadata"].get("text"),
-                "tags": m["metadata"].get("tags", []),
-                "score": m.get("score"),
-                "timestamp": m["metadata"].get("timestamp")
-            }
-            for m in matches
-        ]
-
-        return {"matches": formatted}
-
-    except Exception as e:
-        return JSONResponse(content={"error": str(e)}, status_code=500)
+    return {"results": memories}
