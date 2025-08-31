@@ -2,56 +2,87 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 import os
 from openai import OpenAI
-import pinecone
+from pinecone import Pinecone
 
-# Initialize FastAPI
+# ---------- Init ----------
 app = FastAPI(title="Core Memory API")
 
-# Load API keys from environment variables
 OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
 PINECONE_API_KEY = os.environ["PINECONE_API_KEY"]
-INDEX_NAME = "core-memory"
+INDEX_NAME = "core-memory"          # must be 1536-dim in Pinecone
 
-# Initialize clients
 client = OpenAI(api_key=OPENAI_API_KEY)
-pc = pinecone.Pinecone(api_key=PINECONE_API_KEY)
-
-# Connect to Pinecone index
+pc = Pinecone(api_key=PINECONE_API_KEY)
 index = pc.Index(INDEX_NAME)
 
+EMBED_MODEL = "text-embedding-3-small"  # 1536-dim
+
+# ---------- Health ----------
 @app.get("/")
 def root():
     return {"status": "Core Memory API is running!"}
 
+# ---------- Store ----------
 @app.post("/store_memory")
 async def store_memory(request: Request):
     data = await request.json()
-    text = data.get("text", "")
+    text = (data.get("text") or "").strip()
+    tags = data.get("tags") or []
 
-    # Get embedding
-    embedding = client.embeddings.create(
-        input=text,
-        model="text-embedding-3-small"
+    if not text:
+        return JSONResponse({"error": "Missing 'text'."}, status_code=400)
+
+    # embed
+    emb = client.embeddings.create(
+        model=EMBED_MODEL,
+        input=text
     ).data[0].embedding
 
-    # Store in Pinecone
-    index.upsert([("mem_1", embedding, {"text": text})])
+    # upsert
+    from datetime import datetime
+    mem_id = f"mem_{datetime.utcnow().isoformat()}"
+    index.upsert([
+        (mem_id, emb, {"text": text, "tags": tags})
+    ])
 
-    return {"status": "success", "stored_text": text}
+    return {"ok": True, "id": mem_id, "tags": tags}
 
+# ---------- Query ----------
 @app.post("/query_memory")
 async def query_memory(request: Request):
     data = await request.json()
-    query = data.get("query", "")
+    query = (data.get("query") or "").strip()
+    top_k = int(data.get("top_k") or 5)
+    topic = data.get("topic")  # optional tag filter
 
-    # Get embedding
-    embedding = client.embeddings.create(
-        input=query,
-        model="text-embedding-3-small"
+    if not query:
+        return JSONResponse({"error": "Missing 'query'."}, status_code=400)
+
+    qemb = client.embeddings.create(
+        model=EMBED_MODEL,
+        input=query
     ).data[0].embedding
 
-    # Query Pinecone
-    results = index.query(vector=embedding, top_k=3, include_metadata=True)
+    pinecone_filter = None
+    if topic:
+        topics = [topic] if isinstance(topic, str) else topic
+        pinecone_filter = {"tags": {"$in": topics}}
 
-    return {"matches": results["matches"]}
+    results = index.query(
+        vector=qemb,
+        top_k=top_k,
+        include_metadata=True,
+        filter=pinecone_filter
+    )
+
+    matches = []
+    for m in results.get("matches", []):
+        matches.append({
+            "id": m.get("id"),
+            "score": m.get("score"),
+            "text": m.get("metadata", {}).get("text"),
+            "tags": m.get("metadata", {}).get("tags", [])
+        })
+
+    return {"matches": matches}
 
