@@ -1,19 +1,3 @@
-from fastapi import FastAPI
-from pydantic import BaseModel
-from openai import OpenAI
-from pinecone import Pinecone
-import os
-
-# --- Keys and setup ---
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
-PINECONE_API_KEY = os.environ.get("PINECONE_API_KEY")
-PINECONE_HOST = os.environ.get("PINECONE_HOST", "https://core-memory-02h73am.svc.aped-4627-b74a.pinecone.io")
-INDEX_NAME = os.environ.get("INDEX_NAME", "core-memory")
-
-client = OpenAI(api_key=OPENAI_API_KEY)
-pc = Pinecone(api_key=PINECONE_API_KEY)
-index = pc.Index(INDEX_NAME)
-
 # --- FastAPI app ---
 app = FastAPI()
 
