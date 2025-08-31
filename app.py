@@ -1,81 +1,75 @@
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.responses import JSONResponse
 import os
-import httpx
 from openai import OpenAI
-from pinecone import Pinecone
+import pinecone
 
-# ---------- Init ----------
+# Initialize FastAPI
 app = FastAPI(title="Core Memory API")
 
-OPENAI_API_KEY   = os.environ["OPENAI_API_KEY"]
+# Load environment variables
+OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
 PINECONE_API_KEY = os.environ["PINECONE_API_KEY"]
-INDEX_NAME       = "core-memory"          # Pinecone index must be 1536-dim
-EMBED_MODEL      = "text-embedding-3-small"
+APP_TOKEN = os.environ["APP_TOKEN"]
+INDEX_NAME = "core-memory"
 
-# Force a clean HTTP client (no proxies)
-http_client = httpx.Client(proxies=None, timeout=30)
-
-client = OpenAI(api_key=OPENAI_API_KEY, http_client=http_client)
-pc = Pinecone(api_key=PINECONE_API_KEY)
+# Initialize clients
+client = OpenAI(api_key=OPENAI_API_KEY)
+pc = pinecone.Pinecone(api_key=PINECONE_API_KEY)
 index = pc.Index(INDEX_NAME)
 
-# ---------- Health ----------
+# --- Auth helper ---
+def verify_token(request: Request):
+    token = request.headers.get("Authorization")
+    if token != f"Bearer {APP_TOKEN}":
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    return True
+
+# --- Routes ---
 @app.get("/")
 def root():
     return {"status": "Core Memory API is running!"}
 
-# ---------- Store ----------
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
+@app.get("/status")
+def status():
+    try:
+        stats = index.describe_index_stats()
+        return {"status": "ok", "pinecone_index": INDEX_NAME, "stats": stats}
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}
+
 @app.post("/store_memory")
-async def store_memory(request: Request):
+async def store_memory(request: Request, authorized: bool = Depends(verify_token)):
     data = await request.json()
-    text = (data.get("text") or "").strip()
-    tags = data.get("tags") or []
+    text = data.get("text", "")
 
-    if not text:
-        return JSONResponse({"error": "Missing 'text'."}, status_code=400)
+    embedding = client.embeddings.create(
+        model="text-embedding-3-small",
+        input=text
+    ).data[0].embedding
 
-    emb = client.embeddings.create(model=EMBED_MODEL, input=text).data[0].embedding
+    index.upsert(vectors=[("mem1", embedding, {"text": text})])
 
-    from datetime import datetime
-    mem_id = f"mem_{datetime.utcnow().isoformat()}"
+    return {"status": "memory stored", "text": text}
 
-    index.upsert([(mem_id, emb, {"text": text, "tags": tags})])
-
-    return {"ok": True, "id": mem_id, "tags": tags}
-
-# ---------- Query ----------
 @app.post("/query_memory")
-async def query_memory(request: Request):
+async def query_memory(request: Request, authorized: bool = Depends(verify_token)):
     data = await request.json()
-    query = (data.get("query") or "").strip()
-    top_k = int(data.get("top_k") or 5)
-    topic = data.get("topic")  # optional tag filter
+    query = data.get("query", "")
 
-    if not query:
-        return JSONResponse({"error": "Missing 'query'."}, status_code=400)
-
-    qemb = client.embeddings.create(model=EMBED_MODEL, input=query).data[0].embedding
-
-    pinecone_filter = None
-    if topic:
-        topics = [topic] if isinstance(topic, str) else topic
-        pinecone_filter = {"tags": {"$in": topics}}
+    query_embedding = client.embeddings.create(
+        model="text-embedding-3-small",
+        input=query
+    ).data[0].embedding
 
     results = index.query(
-        vector=qemb,
-        top_k=top_k,
-        include_metadata=True,
-        filter=pinecone_filter
+        vector=query_embedding,
+        top_k=5,
+        include_metadata=True
     )
 
-    matches = []
-    for m in results.get("matches", []):
-        matches.append({
-            "id": m.get("id"),
-            "score": m.get("score"),
-            "text": m.get("metadata", {}).get("text"),
-            "tags": m.get("metadata", {}).get("tags", [])
-        })
-
-    return {"matches": matches}
+    return {"matches": results["matches"]}
