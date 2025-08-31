@@ -1,21 +1,24 @@
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 import os
+import httpx
 from openai import OpenAI
 from pinecone import Pinecone
 
 # ---------- Init ----------
 app = FastAPI(title="Core Memory API")
 
-OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
+OPENAI_API_KEY   = os.environ["OPENAI_API_KEY"]
 PINECONE_API_KEY = os.environ["PINECONE_API_KEY"]
-INDEX_NAME = "core-memory"          # must be 1536-dim in Pinecone
+INDEX_NAME       = "core-memory"          # Pinecone index must be 1536-dim
+EMBED_MODEL      = "text-embedding-3-small"
 
-client = OpenAI(api_key=OPENAI_API_KEY)
+# Force a clean HTTP client (no proxies)
+http_client = httpx.Client(proxies=None, timeout=30)
+
+client = OpenAI(api_key=OPENAI_API_KEY, http_client=http_client)
 pc = Pinecone(api_key=PINECONE_API_KEY)
 index = pc.Index(INDEX_NAME)
-
-EMBED_MODEL = "text-embedding-3-small"  # 1536-dim
 
 # ---------- Health ----------
 @app.get("/")
@@ -32,18 +35,12 @@ async def store_memory(request: Request):
     if not text:
         return JSONResponse({"error": "Missing 'text'."}, status_code=400)
 
-    # embed
-    emb = client.embeddings.create(
-        model=EMBED_MODEL,
-        input=text
-    ).data[0].embedding
+    emb = client.embeddings.create(model=EMBED_MODEL, input=text).data[0].embedding
 
-    # upsert
     from datetime import datetime
     mem_id = f"mem_{datetime.utcnow().isoformat()}"
-    index.upsert([
-        (mem_id, emb, {"text": text, "tags": tags})
-    ])
+
+    index.upsert([(mem_id, emb, {"text": text, "tags": tags})])
 
     return {"ok": True, "id": mem_id, "tags": tags}
 
@@ -58,10 +55,7 @@ async def query_memory(request: Request):
     if not query:
         return JSONResponse({"error": "Missing 'query'."}, status_code=400)
 
-    qemb = client.embeddings.create(
-        model=EMBED_MODEL,
-        input=query
-    ).data[0].embedding
+    qemb = client.embeddings.create(model=EMBED_MODEL, input=query).data[0].embedding
 
     pinecone_filter = None
     if topic:
@@ -85,4 +79,3 @@ async def query_memory(request: Request):
         })
 
     return {"matches": matches}
-
