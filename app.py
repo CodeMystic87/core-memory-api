@@ -5,13 +5,13 @@ import os
 import pinecone
 from openai import OpenAI
 
-# ---------- Setup ----------
+# Initialize FastAPI
 app = FastAPI()
 
-# OpenAI client
+# Initialize OpenAI
 openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-# Pinecone client
+# Initialize Pinecone
 pinecone_api_key = os.getenv("PINECONE_API_KEY")
 pinecone_env = os.getenv("PINECONE_ENV", "us-east-1")
 index_name = os.getenv("INDEX_NAME", "core-memory")
@@ -42,7 +42,6 @@ async def store_memory(req: MemoryRequest):
     index.upsert([(req.text, embedding, {"text": req.text})])
     return {"status": "stored", "memory": req.text}
 
-
 @app.post("/storeVocabulary")
 async def store_vocabulary(req: VocabularyRequest):
     """Store a whole list of vocabulary words"""
@@ -54,7 +53,6 @@ async def store_vocabulary(req: VocabularyRequest):
         index.upsert([(word, embedding, {"text": word})])
 
     return {"status": "stored", "count": len(req.words)}
-
 
 @app.post("/searchMemories")
 async def search_memories(req: SearchRequest):
@@ -71,7 +69,7 @@ async def search_memories(req: SearchRequest):
     ]
     return {"results": matches}
 
-
 @app.get("/health")
 async def health_check():
     return {"status": "ok"}
+
