@@ -5,13 +5,13 @@ import os
 import pinecone
 from openai import OpenAI
 
-# Initialize FastAPI
+# ---------- Setup ----------
 app = FastAPI()
 
-# Initialize OpenAI
+# OpenAI client
 openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-# Initialize Pinecone
+# Pinecone client
 pinecone_api_key = os.getenv("PINECONE_API_KEY")
 pinecone_env = os.getenv("PINECONE_ENV", "us-east-1")
 index_name = os.getenv("INDEX_NAME", "core-memory")
@@ -31,7 +31,6 @@ class SearchRequest(BaseModel):
     topk: int = 5
 
 # ---------- Endpoints ----------
-
 @app.post("/storeMemory")
 async def store_memory(req: MemoryRequest):
     """Store a single memory snippet"""
@@ -42,6 +41,7 @@ async def store_memory(req: MemoryRequest):
 
     index.upsert([(req.text, embedding, {"text": req.text})])
     return {"status": "stored", "memory": req.text}
+
 
 @app.post("/storeVocabulary")
 async def store_vocabulary(req: VocabularyRequest):
@@ -54,6 +54,7 @@ async def store_vocabulary(req: VocabularyRequest):
         index.upsert([(word, embedding, {"text": word})])
 
     return {"status": "stored", "count": len(req.words)}
+
 
 @app.post("/searchMemories")
 async def search_memories(req: SearchRequest):
@@ -69,6 +70,7 @@ async def search_memories(req: SearchRequest):
         for match in results["matches"]
     ]
     return {"results": matches}
+
 
 @app.get("/health")
 async def health_check():
