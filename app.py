@@ -2,6 +2,9 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 from typing import List, Optional
 import os
+import datetime
+import dateparser  # NEW: natural language date parsing
+import hashlib
 from openai import OpenAI
 from pinecone import Pinecone
 
@@ -27,6 +30,31 @@ class VocabularyRequest(BaseModel):
 class SearchRequest(BaseModel):
     query: str
     topk: int = 5
+    tags: Optional[List[str]] = []
+
+# ---------- Helpers ----------
+def normalize_dates_from_query(query: str) -> List[str]:
+    """
+    Look for natural language dates in the query and return standardized YYYY-MM-DD tags.
+    """
+    possible_tags = []
+    today = datetime.date.today()
+
+    # Use dateparser to catch things like "September 1st", "yesterday"
+    parsed_date = dateparser.parse(query)
+    if parsed_date:
+        possible_tags.append(parsed_date.date().isoformat())
+
+    # Handle some common keywords explicitly
+    if "today" in query.lower():
+        possible_tags.append(today.isoformat())
+    if "yesterday" in query.lower():
+        possible_tags.append((today - datetime.timedelta(days=1)).isoformat())
+    if "last week" in query.lower():
+        for i in range(7):
+            possible_tags.append((today - datetime.timedelta(days=i)).isoformat())
+
+    return list(set(possible_tags))  # Deduplicate
 
 # ---------- Endpoints ----------
 @app.post("/storeMemory")
@@ -40,10 +68,7 @@ async def store_memory(req: MemoryRequest):
     if req.tags:
         metadata["tags"] = req.tags
 
-    # Use deterministic ID (hash) instead of text as ID
-    import hashlib
     memory_id = hashlib.md5(req.text.encode()).hexdigest()
-
     index.upsert([(memory_id, embedding, metadata)])
     return {"status": "stored", "memory": req.text, "tags": req.tags}
 
@@ -60,25 +85,34 @@ async def store_vocabulary(req: VocabularyRequest):
 
 @app.post("/searchMemories")
 async def search_memories(req: SearchRequest):
+    # Generate embedding
     embedding = openai_client.embeddings.create(
         model="text-embedding-3-small",
         input=req.query
     ).data[0].embedding
 
+    # Normalize query → tags
+    inferred_tags = normalize_dates_from_query(req.query)
+    all_tags = (req.tags or []) + inferred_tags
+
+    # Run Pinecone query
     results = index.query(
         vector=embedding,
         top_k=req.topk,
         include_metadata=True
     )
 
-    matches = [
-        {
-            "text": match["metadata"].get("text", ""),
-            "tags": match["metadata"].get("tags", []),
-            "score": match["score"]
-        }
-        for match in results["matches"]
-    ]
+    # Filter results by tags if any
+    matches = []
+    for match in results["matches"]:
+        memory_tags = match["metadata"].get("tags", [])
+        if not all_tags or any(tag in memory_tags for tag in all_tags):
+            matches.append({
+                "text": match["metadata"].get("text", ""),
+                "tags": memory_tags,
+                "score": match["score"]
+            })
+
     return {"results": matches}
 
 @app.get("/health")
