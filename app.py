@@ -1,86 +1,75 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
-from typing import List, Optional
-from openai import OpenAI
-from pinecone import Pinecone, ServerlessSpec
+from typing import List
 import os
-import uuid
+import pinecone
+from openai import OpenAI
 
 # Initialize FastAPI
 app = FastAPI()
 
-# Initialize OpenAI + Pinecone
+# Initialize OpenAI
 openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
 
-# Pinecone index name (make sure it matches your dashboard)
-INDEX_NAME = os.getenv("INDEX_NAME", "core-memory")
+# Initialize Pinecone
+pinecone_api_key = os.getenv("PINECONE_API_KEY")
+pinecone_env = os.getenv("PINECONE_ENV", "us-east-1")
+index_name = os.getenv("INDEX_NAME", "core-memory")
 
-# Create Pinecone index if it doesn't exist
-if INDEX_NAME not in pc.list_indexes().names():
-    pc.create_index(
-        name=INDEX_NAME,
-        dimension=1536,  # embedding size for text-embedding-3-small
-        metric="cosine",
-        spec=ServerlessSpec(cloud="aws", region="us-east-1")
-    )
+pinecone.init(api_key=pinecone_api_key, environment=pinecone_env)
+index = pinecone.Index(index_name)
 
-index = pc.Index(INDEX_NAME)
-
-# Request models
-class StoreMemoryRequest(BaseModel):
+# ---------- Request Models ----------
+class MemoryRequest(BaseModel):
     text: str
-    metadata: Optional[dict] = None
 
-class SearchMemoryRequest(BaseModel):
+class VocabularyRequest(BaseModel):
+    words: List[str]
+
+class SearchRequest(BaseModel):
     query: str
     topk: int = 5
 
-# Store Memory endpoint
+# ---------- Endpoints ----------
+
 @app.post("/storeMemory")
-def store_memory(req: StoreMemoryRequest):
-    # Create embedding
+async def store_memory(req: MemoryRequest):
+    """Store a single memory snippet"""
     embedding = openai_client.embeddings.create(
         model="text-embedding-3-small",
         input=req.text
     ).data[0].embedding
 
-    # Unique ID for this memory
-    memory_id = str(uuid.uuid4())
+    index.upsert([(req.text, embedding, {"text": req.text})])
+    return {"status": "stored", "memory": req.text}
 
-    # Store in Pinecone
-    index.upsert([
-        {
-            "id": memory_id,
-            "values": embedding,
-            "metadata": {"text": req.text, **(req.metadata or {})}
-        }
-    ])
+@app.post("/storeVocabulary")
+async def store_vocabulary(req: VocabularyRequest):
+    """Store a whole list of vocabulary words"""
+    for word in req.words:
+        embedding = openai_client.embeddings.create(
+            model="text-embedding-3-small",
+            input=word
+        ).data[0].embedding
+        index.upsert([(word, embedding, {"text": word})])
 
-    return {"message": "Memory stored", "id": memory_id}
+    return {"status": "stored", "count": len(req.words)}
 
-# Search Memories endpoint
 @app.post("/searchMemories")
-def search_memories(req: SearchMemoryRequest):
-    # Embed query
+async def search_memories(req: SearchRequest):
+    """Search memories with semantic similarity"""
     embedding = openai_client.embeddings.create(
         model="text-embedding-3-small",
         input=req.query
     ).data[0].embedding
 
-    # Query Pinecone
-    results = index.query(
-        vector=embedding,
-        top_k=req.topk,
-        include_metadata=True
-    )
-
+    results = index.query(vector=embedding, top_k=req.topk, include_metadata=True)
     matches = [
-        {
-            "text": match["metadata"]["text"],
-            "score": match["score"]
-        }
+        {"text": match["metadata"]["text"], "score": match["score"]}
         for match in results["matches"]
     ]
-
     return {"results": matches}
+
+@app.get("/health")
+async def health_check():
+    return {"status": "ok"}
