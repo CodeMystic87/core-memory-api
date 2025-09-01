@@ -1,80 +1,86 @@
-import os
-import uuid
 from fastapi import FastAPI
 from pydantic import BaseModel
-from pinecone import Pinecone
+from typing import List, Optional
 from openai import OpenAI
+from pinecone import Pinecone, ServerlessSpec
+import os
+import uuid
 
 # Initialize FastAPI
 app = FastAPI()
 
-# Load environment variables
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
+# Initialize OpenAI + Pinecone
+openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
+
+# Pinecone index name (make sure it matches your dashboard)
 INDEX_NAME = os.getenv("INDEX_NAME", "core-memory")
 
-# Initialize clients
-openai_client = OpenAI(api_key=OPENAI_API_KEY)
-pc = Pinecone(api_key=PINECONE_API_KEY)
+# Create Pinecone index if it doesn't exist
+if INDEX_NAME not in pc.list_indexes().names():
+    pc.create_index(
+        name=INDEX_NAME,
+        dimension=1536,  # embedding size for text-embedding-3-small
+        metric="cosine",
+        spec=ServerlessSpec(cloud="aws", region="us-east-1")
+    )
+
 index = pc.Index(INDEX_NAME)
 
+# Request models
+class StoreMemoryRequest(BaseModel):
+    text: str
+    metadata: Optional[dict] = None
 
-# ================================
-# Request/Response Models
-# ================================
-class SearchRequest(BaseModel):
+class SearchMemoryRequest(BaseModel):
     query: str
     topk: int = 5
 
+# Store Memory endpoint
+@app.post("/storeMemory")
+def store_memory(req: StoreMemoryRequest):
+    # Create embedding
+    embedding = openai_client.embeddings.create(
+        model="text-embedding-3-small",
+        input=req.text
+    ).data[0].embedding
 
-class StoreRequest(BaseModel):
-    text: str
+    # Unique ID for this memory
+    memory_id = str(uuid.uuid4())
 
+    # Store in Pinecone
+    index.upsert([
+        {
+            "id": memory_id,
+            "values": embedding,
+            "metadata": {"text": req.text, **(req.metadata or {})}
+        }
+    ])
 
-# ================================
-# Search Memories
-# ================================
+    return {"message": "Memory stored", "id": memory_id}
+
+# Search Memories endpoint
 @app.post("/searchMemories")
-def search_memories(req: SearchRequest):
+def search_memories(req: SearchMemoryRequest):
+    # Embed query
     embedding = openai_client.embeddings.create(
         model="text-embedding-3-small",
         input=req.query
     ).data[0].embedding
 
+    # Query Pinecone
     results = index.query(
         vector=embedding,
         top_k=req.topk,
         include_metadata=True
     )
 
-    memories = [
-        {"text": match["metadata"]["text"], "score": match["score"]}
+    matches = [
+        {
+            "text": match["metadata"]["text"],
+            "score": match["score"]
+        }
         for match in results["matches"]
     ]
 
-    return {"results": memories}
-
-
-# ================================
-# Store Memory (NEW)
-# ================================
-@app.post("/storeMemory")
-def store_memory(req: StoreRequest):
-    embedding = openai_client.embeddings.create(
-        model="text-embedding-3-small",
-        input=req.text
-    ).data[0].embedding
-
-    # Generate unique ID
-    mem_id = str(uuid.uuid4())
-
-    # Insert into Pinecone
-    index.upsert([
-        {
-            "id": mem_id,
-            "values": embedding,
-            "metadata": {"text": req.text}
-        }
-    ])
-
-    return {"status": "ok", "id": mem_id, "text": req.text}
+    return {"results": matches}
