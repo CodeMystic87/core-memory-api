@@ -1,4 +1,3 @@
-
 from fastapi import FastAPI
 from pydantic import BaseModel
 from typing import List
@@ -9,7 +8,7 @@ from openai import OpenAI
 # Initialize FastAPI
 app = FastAPI()
 
-# Initialize OpenAI client (new SDK)
+# Initialize OpenAI client
 openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 # Initialize Pinecone
@@ -41,9 +40,7 @@ async def store_memory(req: MemoryRequest):
         input=req.text
     ).data[0].embedding
 
-    index.upsert([
-        (req.text, embedding, {"text": req.text})
-    ])
+    index.upsert([(req.text, embedding, {"text": req.text})])
     return {"status": "stored", "memory": req.text}
 
 @app.post("/storeVocabulary")
@@ -54,9 +51,7 @@ async def store_vocabulary(req: VocabularyRequest):
             model="text-embedding-3-small",
             input=word
         ).data[0].embedding
-        index.upsert([
-            (word, embedding, {"text": word})
-        ])
+        index.upsert([(word, embedding, {"text": word})])
 
     return {"status": "stored", "count": len(req.words)}
 
