@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
 from typing import List, Optional
-import os, datetime
+import os
 from openai import OpenAI
 from pinecone import Pinecone
 
@@ -19,7 +19,7 @@ index = pc.Index(index_name)
 # ---------- Request Models ----------
 class MemoryRequest(BaseModel):
     text: str
-    tags: Optional[List[str]] = []  # ✅ now supports tags
+    tags: Optional[List[str]] = []
 
 class VocabularyRequest(BaseModel):
     words: List[str]
@@ -36,19 +36,15 @@ async def store_memory(req: MemoryRequest):
         input=req.text
     ).data[0].embedding
 
-    # ✅ Attach metadata: text, tags, timestamp
-    metadata = {
-        "text": req.text,
-        "tags": req.tags or [],
-        "timestamp": datetime.datetime.utcnow().isoformat()
-    }
+    metadata = {"text": req.text}
+    if req.tags:
+        metadata["tags"] = req.tags
 
-    # Use unique ID for Pinecone (avoid overwriting)
-    item_id = f"mem-{datetime.datetime.utcnow().timestamp()}"
+    # Use deterministic ID (hash) instead of text as ID
+    import hashlib
+    memory_id = hashlib.md5(req.text.encode()).hexdigest()
 
-    index.upsert([
-        (item_id, embedding, metadata)
-    ])
+    index.upsert([(memory_id, embedding, metadata)])
     return {"status": "stored", "memory": req.text, "tags": req.tags}
 
 @app.post("/storeVocabulary")
@@ -58,14 +54,8 @@ async def store_vocabulary(req: VocabularyRequest):
             model="text-embedding-3-small",
             input=word
         ).data[0].embedding
-        metadata = {
-            "text": word,
-            "tags": ["vocabulary"],
-            "timestamp": datetime.datetime.utcnow().isoformat()
-        }
-        index.upsert([
-            (f"vocab-{word}-{datetime.datetime.utcnow().timestamp()}", embedding, metadata)
-        ])
+        word_id = f"vocab-{word}"
+        index.upsert([(word_id, embedding, {"text": word})])
     return {"status": "stored", "count": len(req.words)}
 
 @app.post("/searchMemories")
@@ -85,7 +75,6 @@ async def search_memories(req: SearchRequest):
         {
             "text": match["metadata"].get("text", ""),
             "tags": match["metadata"].get("tags", []),
-            "timestamp": match["metadata"].get("timestamp", ""),
             "score": match["score"]
         }
         for match in results["matches"]
