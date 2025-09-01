@@ -2,22 +2,19 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 from typing import List
 import os
-import pinecone
 from openai import OpenAI
+from pinecone import Pinecone
 
 # Initialize FastAPI
 app = FastAPI()
 
-# Initialize OpenAI client
+# Initialize OpenAI
 openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-# Initialize Pinecone
-pinecone_api_key = os.getenv("PINECONE_API_KEY")
-pinecone_env = os.getenv("PINECONE_ENV", "us-east-1")
+# Initialize Pinecone (new SDK)
+pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
 index_name = os.getenv("INDEX_NAME", "core-memory")
-
-pinecone.init(api_key=pinecone_api_key, environment=pinecone_env)
-index = pinecone.Index(index_name)
+index = pc.Index(index_name)
 
 # ---------- Request Models ----------
 class MemoryRequest(BaseModel):
@@ -31,10 +28,8 @@ class SearchRequest(BaseModel):
     topk: int = 5
 
 # ---------- Endpoints ----------
-
 @app.post("/storeMemory")
 async def store_memory(req: MemoryRequest):
-    """Store a single memory snippet"""
     embedding = openai_client.embeddings.create(
         model="text-embedding-3-small",
         input=req.text
@@ -45,19 +40,16 @@ async def store_memory(req: MemoryRequest):
 
 @app.post("/storeVocabulary")
 async def store_vocabulary(req: VocabularyRequest):
-    """Store a whole list of vocabulary words"""
     for word in req.words:
         embedding = openai_client.embeddings.create(
             model="text-embedding-3-small",
             input=word
         ).data[0].embedding
         index.upsert([(word, embedding, {"text": word})])
-
     return {"status": "stored", "count": len(req.words)}
 
 @app.post("/searchMemories")
 async def search_memories(req: SearchRequest):
-    """Search memories with semantic similarity"""
     embedding = openai_client.embeddings.create(
         model="text-embedding-3-small",
         input=req.query
