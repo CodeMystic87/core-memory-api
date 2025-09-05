@@ -1,8 +1,5 @@
+fastapi
+unicorn
 openai
-pincone-client
-
-fastapi==0.110.0
-uvicorn==0.29.0
-openai==1.3.9
-pinecone-client==3.2.2
-httpx==0.27.0
+pinecone-client
+httpx
