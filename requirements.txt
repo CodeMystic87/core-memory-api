@@ -1,5 +1,5 @@
 openai
-pincone_clinet
+pincone-client
 
 fastapi==0.110.0
 uvicorn==0.29.0
