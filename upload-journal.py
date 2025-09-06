@@ -1,3 +1,4 @@
+print("✅ upload_journal.py has started running...")
 import os
 import json
 import pinecone
