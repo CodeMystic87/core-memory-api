@@ -10,7 +10,7 @@ client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 # Initialize Pinecone
 pc = pinecone.Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
-index = pc.Index("dayonememories")
+index = pc.Index("core-memory")
 
 # Path to your JSONL file
 file_path = "journal_with_tags_and_categories.jsonl"

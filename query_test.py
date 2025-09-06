@@ -9,7 +9,7 @@ client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 # === Initialize Pinecone ===
 pc = pinecone.Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
-index = pc.Index("dayonememories")
+index = pc.Index("core-memory")
 
 # === Your test query ===
 query = "Can you tell me about some stressful moments in June?"
