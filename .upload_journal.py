@@ -1,33 +1,37 @@
 import os
 import json
-import pinecone
 from openai import OpenAI
+from pinecone import Pinecone
 
-print("🚀 upload_journal.py has started running...")
+print("✅ upload_journal.py has started running...")
 
 # --- Initialize OpenAI ---
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 # --- Initialize Pinecone ---
-pc = pinecone.Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
+pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
 index_name = "dayonememories"
 
-# Check if index exists, create if missing
+# If index doesn’t exist, create it
 if index_name not in pc.list_indexes().names():
     print(f"Creating Pinecone index '{index_name}'...")
     pc.create_index(
         name=index_name,
-        dimension=1536,  # text-embedding-3-small dimension
+        dimension=1536,  # for text-embedding-3-small
         metric="cosine",
-        spec=pinecone.ServerlessSpec(cloud="aws", region=os.getenv("PINECONE_ENV"))
+        spec={
+            "serverless": {
+                "cloud": "aws",
+                "region": os.getenv("PINECONE_ENV", "us-east-1")
+            }
+        }
     )
-else:
-    print(f"✅ Pinecone index '{index_name}' already exists.")
 
 index = pc.Index(index_name)
 
-# --- Load Journal Entries ---
+# --- Load journal entries ---
 file_path = "journal_with_tags_and_categories.jsonl"
+print(f"📂 Checking for journal file: {file_path}")
 
 if not os.path.exists(file_path):
     print(f"❌ File not found: {file_path}")
@@ -36,47 +40,36 @@ if not os.path.exists(file_path):
 with open(file_path, "r", encoding="utf-8") as f:
     entries = [json.loads(line) for line in f]
 
-print(f"📓 Loaded {len(entries)} journal entries")
+print(f"✅ Loaded {len(entries)} journal entries")
 
-# --- Process in Batches ---
+# --- Process entries in batches ---
 batch_size = 100
-
 for i in range(0, len(entries), batch_size):
     batch = entries[i:i + batch_size]
-    texts = [str(entry["text"]) for entry in batch]
-
-    print(f"🔄 Processing batch {i // batch_size + 1} with {len(texts)} entries...")
+    print(f"📦 Processing batch {i // batch_size + 1} with {len(batch)} entries...")
 
     # Create embeddings
-    try:
-        embeddings = client.embeddings.create(
-            model="text-embedding-3-small",
-            input=texts
-        )
-    except Exception as e:
-        print(f"❌ Error creating embeddings: {e}")
-        break
+    texts = [entry["text"] for entry in batch]
+    embeddings = client.embeddings.create(
+        model="text-embedding-3-small",
+        input=texts
+    )
 
-    # Format for Pinecone
+    # Format for Pinecone upsert (tuple format)
     vectors = [
-        {
-            "id": f"entry-{i+j}",
-            "values": embeddings.data[j].embedding,
-            "metadata": {
+        (
+            f"entry-{i+j}",
+            embeddings.data[j].embedding,
+            {
                 "tag": entry.get("tag", ""),
                 "category": entry.get("category", ""),
                 "text": entry["text"]
             }
-        }
+        )
         for j, entry in enumerate(batch)
     ]
 
-    # Upload batch
-    try:
-        index.upsert(vectors)
-        print(f"✅ Uploaded batch {i // batch_size + 1}")
-    except Exception as e:
-        print(f"❌ Error uploading to Pinecone: {e}")
-        break
+    # Send to Pinecone
+    index.upsert(vectors=vectors)
 
 print("🎉 Finished uploading all journal entries to Pinecone!")
