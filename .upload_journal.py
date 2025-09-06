@@ -12,12 +12,11 @@ client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
 index_name = "dayonememories"
 
-# If index doesn’t exist, create it
 if index_name not in pc.list_indexes().names():
     print(f"Creating Pinecone index '{index_name}'...")
     pc.create_index(
         name=index_name,
-        dimension=1536,  # for text-embedding-3-small
+        dimension=1536,
         metric="cosine",
         spec={
             "serverless": {
@@ -48,14 +47,14 @@ for i in range(0, len(entries), batch_size):
     batch = entries[i:i + batch_size]
     print(f"📦 Processing batch {i // batch_size + 1} with {len(batch)} entries...")
 
-    # Create embeddings
     texts = [entry["text"] for entry in batch]
+
+    # ✅ Ensure correct API call for embeddings
     embeddings = client.embeddings.create(
         model="text-embedding-3-small",
         input=texts
     )
 
-    # Format for Pinecone upsert (tuple format)
     vectors = [
         (
             f"entry-{i+j}",
@@ -69,7 +68,6 @@ for i in range(0, len(entries), batch_size):
         for j, entry in enumerate(batch)
     ]
 
-    # Send to Pinecone
     index.upsert(vectors=vectors)
 
 print("🎉 Finished uploading all journal entries to Pinecone!")
