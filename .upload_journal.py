@@ -2,37 +2,36 @@ print("✅ upload_journal.py has started running...")
 
 import os
 import json
-import pinecone
+from pinecone import Pinecone, ServerlessSpec
 from openai import OpenAI
 
 # Initialize OpenAI
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-# Initialize Pinecone
-pinecone.init(
-    api_key=os.getenv("PINECONE_API_KEY"),
-    environment=os.getenv("PINECONE_ENV")   # should be "us-east-1" for your index
-)
+# Initialize Pinecone client
+pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
 
 index_name = "dayonememories"
 
-# Auto-create index if it doesn't exist
-if index_name not in pinecone.list_indexes():
-    print(f"📌 Creating index '{index_name}'...")
-    pinecone.create_index(
-        name=index_name,
-        dimension=1536,        # embedding size for text-embedding-3-small/large
-        metric="cosine",
-        spec=pinecone.ServerlessSpec(
-            cloud="aws",
-            region=os.getenv("PINECONE_ENV")  # us-east-1
-        )
-    )
-else:
-    print(f"✅ Index '{index_name}' already exists")
+# Always delete the index first (clean slate)
+if index_name in [i["name"] for i in pc.list_indexes()]:
+    print(f"🗑 Deleting existing index '{index_name}'...")
+    pc.delete_index(index_name)
 
-# Connect to index
-index = pinecone.Index(index_name)
+# Recreate index
+print(f"📌 Creating fresh index '{index_name}'...")
+pc.create_index(
+    name=index_name,
+    dimension=1536,  # text-embedding-3-small/large
+    metric="cosine",
+    spec=ServerlessSpec(
+        cloud="aws",
+        region=os.getenv("PINECONE_ENV")  # should be "us-east-1"
+    )
+)
+
+# Connect to new index
+index = pc.Index(index_name)
 
 # Path to your JSONL file
 file_path = "journal_with_tags_and_categories.jsonl"
@@ -48,7 +47,7 @@ with open(file_path, "r", encoding="utf-8") as f:
 
 print(f"📖 Loaded {len(entries)} journal entries")
 
-# Process entries in batches
+# Process in batches
 batch_size = 50
 for i in range(0, len(entries), batch_size):
     batch = entries[i:i+batch_size]
@@ -56,17 +55,17 @@ for i in range(0, len(entries), batch_size):
     # Extract texts
     texts = [entry["text"] for entry in batch]
 
-    # Create embeddings
+    # Generate embeddings
     embeddings = client.embeddings.create(
-        model="text-embedding-3-small",   # or "text-embedding-3-large"
+        model="text-embedding-3-small",
         input=texts
     )
 
-    # Format vectors for Pinecone
+    # Prepare Pinecone vectors
     vectors = []
     for entry, emb in zip(batch, embeddings.data):
         vectors.append({
-            "id": entry["id"],  # unique ID for the entry
+            "id": entry["id"],
             "values": emb.embedding,
             "metadata": {
                 "tag": entry.get("tag", ""),
@@ -76,7 +75,11 @@ for i in range(0, len(entries), batch_size):
         })
 
     # Upload to Pinecone
-    index.upsert(vectors)
+    index.upsert(vectors=vectors)
     print(f"⬆️ Uploaded {len(vectors)} entries")
 
-print("✅ Upload complete! 🎉")
+print("🎉 Upload complete!")
+print("✅ All journal entries uploaded successfully.")
+import sys
+sys.exit(0)
+
