@@ -31,32 +31,6 @@ class SearchRequest(BaseModel):
     tags: Optional[List[str]] = []
 
 # ---------- Endpoints ----------
-@app.post("/storeMemory")
-async def store_memory(req: MemoryRequest):
-    embedding = openai_client.embeddings.create(
-        model="text-embedding-3-small",
-        input=req.text
-    ).data[0].embedding
-
-    metadata = {"text": req.text}
-    if req.tags:
-        metadata["tags"] = req.tags
-
-    memory_id = hashlib.md5(req.text.encode()).hexdigest()
-    index.upsert([(memory_id, embedding, metadata)])
-    return {"status": "stored", "memory": req.text, "tags": req.tags}
-
-@app.post("/storeVocabulary")
-async def store_vocabulary(req: VocabularyRequest):
-    for word in req.words:
-        embedding = openai_client.embeddings.create(
-            model="text-embedding-3-small",
-            input=word
-        ).data[0].embedding
-        word_id = f"vocab-{word}"
-        index.upsert([(word_id, embedding, {"text": word})])
-    return {"status": "stored", "count": len(req.words)}
-
 @app.post("/searchMemories")
 async def search_memories(req: SearchRequest):
     embedding = None
@@ -68,9 +42,9 @@ async def search_memories(req: SearchRequest):
             input=req.query
         ).data[0].embedding
     else:
-        # Case 2: No query → skip embeddings, just use filters
-        # Use a dummy vector of correct dimension for Pinecone
-        embedding = [0.0] * 1536  # "text-embedding-3-small" = 1536 dims
+        # Case 2: No query → skip embeddings, use dummy vector
+        # "text-embedding-3-small" has 1536 dimensions
+        embedding = [0.0] * 1536
 
     # Build filters
     pinecone_filter = None
