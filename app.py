@@ -59,16 +59,21 @@ async def store_vocabulary(req: VocabularyRequest):
 
 @app.post("/searchMemories")
 async def search_memories(req: SearchRequest):
-    embedding = openai_client.embeddings.create(
-        model="text-embedding-3-small",
-        input=req.query
-    ).data[0].embedding
+    embedding = None
+
+    # Only create an embedding if query text is provided
+    if req.query:
+        embedding = openai_client.embeddings.create(
+            model="text-embedding-3-small",
+            input=req.query
+        ).data[0].embedding
 
     # If tags were provided, filter Pinecone results
     pinecone_filter = None
     if req.tags:
         pinecone_filter = {"tags": {"$in": req.tags}}
 
+    # Run Pinecone query
     results = index.query(
         vector=embedding,
         top_k=req.topk,
@@ -78,13 +83,15 @@ async def search_memories(req: SearchRequest):
 
     matches = [
         {
-            "text": match["metadata"].get("text", ""),
-            "tags": match["metadata"].get("tags", []),
-            "score": match["score"]
+            "id": match["id"],
+            "score": match["score"],
+            "metadata": match["metadata"]
         }
         for match in results["matches"]
     ]
+
     return {"results": matches}
+
 
 @app.get("/health")
 async def health_check():
