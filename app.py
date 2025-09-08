@@ -68,18 +68,28 @@ async def search_memories(req: SearchRequest):
             input=req.query
         ).data[0].embedding
 
-    # If tags were provided, filter Pinecone results
+    # Build filters
     pinecone_filter = None
     if req.tags:
         pinecone_filter = {"tags": {"$in": req.tags}}
 
     # Run Pinecone query
-    results = index.query(
-        vector=embedding,
-        top_k=req.topk,
-        include_metadata=True,
-        filter=pinecone_filter
-    )
+    if embedding:
+        # Query Pinecone using embeddings
+        results = index.query(
+            vector=embedding,
+            top_k=req.topk,
+            include_metadata=True,
+            filter=pinecone_filter
+        )
+    else:
+        # Query Pinecone using only filters (no embedding)
+        results = index.query(
+            vector=[0.0] * 1536,  # dummy vector (size must match your index)
+            top_k=req.topk,
+            include_metadata=True,
+            filter=pinecone_filter
+        )
 
     matches = [
         {
@@ -91,6 +101,7 @@ async def search_memories(req: SearchRequest):
     ]
 
     return {"results": matches}
+
 
 
 @app.get("/health")
