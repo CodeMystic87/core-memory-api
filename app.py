@@ -61,12 +61,16 @@ async def store_vocabulary(req: VocabularyRequest):
 async def search_memories(req: SearchRequest):
     embedding = None
 
-    # Only create an embedding if query text is provided
+    # Case 1: Query exists → generate embedding from OpenAI
     if req.query:
         embedding = openai_client.embeddings.create(
             model="text-embedding-3-small",
             input=req.query
         ).data[0].embedding
+    else:
+        # Case 2: No query → skip embeddings, just use filters
+        # Use a dummy vector of correct dimension for Pinecone
+        embedding = [0.0] * 1536  # "text-embedding-3-small" = 1536 dims
 
     # Build filters
     pinecone_filter = None
@@ -74,22 +78,12 @@ async def search_memories(req: SearchRequest):
         pinecone_filter = {"tags": {"$in": req.tags}}
 
     # Run Pinecone query
-    if embedding:
-        # Query Pinecone using embeddings
-        results = index.query(
-            vector=embedding,
-            top_k=req.topk,
-            include_metadata=True,
-            filter=pinecone_filter
-        )
-    else:
-        # Query Pinecone using only filters (no embedding)
-        results = index.query(
-            vector=[0.0] * 1536,  # dummy vector (size must match your index)
-            top_k=req.topk,
-            include_metadata=True,
-            filter=pinecone_filter
-        )
+    results = index.query(
+        vector=embedding,
+        top_k=req.topk,
+        include_metadata=True,
+        filter=pinecone_filter
+    )
 
     matches = [
         {
@@ -101,6 +95,7 @@ async def search_memories(req: SearchRequest):
     ]
 
     return {"results": matches}
+
 
 
 
