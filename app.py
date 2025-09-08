@@ -51,6 +51,49 @@ class SearchRequest(BaseModel):
     sort_by: str = "newest"
     summarize: bool = False
 
+@app.post("/searchMemories")
+async def search_memories(req: SearchRequest):
+    embedding = None
+
+    # Case 1: Query exists → generate embedding from OpenAI
+    if req.query:
+        embedding = openai_client.embeddings.create(
+            model="text-embedding-3-small",
+            input=req.query
+        ).data[0].embedding
+        print("DEBUG - Using real embedding for query:", req.query)
+    else:
+        # Case 2: No query → use dummy vector
+        embedding = [0.0] * 1536
+        print("DEBUG - No query provided. Using dummy embedding vector of length:", len(embedding))
+
+    # Build filters
+    pinecone_filter = None
+    if req.tags:
+        pinecone_filter = {"tags": {"$in": req.tags}}
+        print("DEBUG - Pinecone filter applied:", pinecone_filter)
+    else:
+        print("DEBUG - No Pinecone filter applied")
+
+    # Run Pinecone query
+    results = index.query(
+        vector=embedding,
+        top_k=req.topk,
+        include_metadata=True,
+        filter=pinecone_filter
+    )
+    print("DEBUG - Pinecone returned", len(results["matches"]), "matches")
+
+    matches = [
+        {
+            "id": match["id"],
+            "score": match["score"],
+            "metadata": match["metadata"]
+        }
+        for match in results["matches"]
+    ]
+
+    return {"results": matches}
 
 
 
