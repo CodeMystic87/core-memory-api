@@ -50,7 +50,7 @@ def upload_entries():
 
             index.upsert([
                 {
-                    "id": entry.get("id", entry["meta"].get("datetime_iso", "")),
+                    "id": entry.get("id", entry.get("meta", {}).get("datetime_iso", "")),
                     "values": vector,
                     "metadata": metadata
                 }
