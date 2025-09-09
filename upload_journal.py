@@ -34,7 +34,7 @@ for i in range(0, len(entries), batch_size):
     batch = entries[i:i + batch_size]
     vectors = []
 
-    for entry in batch:
+    for j, entry in enumerate(batch):
         try:
             # Safely coerce text to string
             raw_text = entry.get("text", "")
@@ -53,12 +53,15 @@ for i in range(0, len(entries), batch_size):
 
             # Build Pinecone vector
             vectors.append({
-                "id": str(entry.get("id", f"entry-{i}")),  # fallback ID if missing
+                "id": str(entry.get("id", f"entry-{i}-{j}")),  # unique fallback
                 "values": embedding,
                 "metadata": {
                     "text": text,
+                    "title": entry.get("title", "Untitled"),
                     "tags": entry.get("tags", []),
-                    "category": entry.get("category", "uncategorized")
+                    "category": entry.get("category", "uncategorized"),
+                    "date": entry.get("date", ""),
+                    "date_friendly": entry.get("date_friendly", "")
                 }
             })
 
