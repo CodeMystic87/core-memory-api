@@ -1,86 +1,78 @@
 import os
 import json
 from openai import OpenAI
-import pinecone
+from pinecone import Pinecone
 
-print("🚀 migrate_journal.py has started running...")
+print("🚀 Running migrate_clean_journal.py...")
 
-# Initialize OpenAI
+# Initialize OpenAI + Pinecone
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-
-# Initialize Pinecone
-pc = pinecone.Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
+pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
 index = pc.Index("core-memory")
 
-# Path to your JSONL file
+# Path to your journal file
 file_path = "journal_with_tags_and_categories.jsonl"
 
-print("📂 Checking for journal file...")
 if not os.path.exists(file_path):
     print(f"❌ File not found: {file_path}")
     exit(1)
 
+# 🔄 Delete only pre-September journal entries
+print("⚠️ Clearing journal entries before 2025-09-01...")
+index.delete(filter={"date": {"$lt": "2025-09-01"}})
+print("✅ Old journal entries cleared. Live memories are safe.")
+
 # Load entries
+entries = []
 with open(file_path, "r", encoding="utf-8") as f:
-    entries = [json.loads(line) for line in f]
+    for line in f:
+        try:
+            entry = json.loads(line)
+            entries.append(entry)
+        except Exception as e:
+            print(f"⚠️ Skipping invalid line: {e}")
 
 print(f"✅ Loaded {len(entries)} journal entries")
 
-# Process in batches
+# Upload in batches
 batch_size = 100
 uploaded_count = 0
 
 for i in range(0, len(entries), batch_size):
-    batch = entries[i:i + batch_size]
+    batch = entries[i:i+batch_size]
     vectors = []
 
-    for j, entry in enumerate(batch):
+    for entry in batch:
         try:
-            # Safely coerce text to string
-            raw_text = entry.get("text", "")
-            text = str(raw_text).strip()
-
-            # Skip empty or invalid text
+            text = str(entry.get("text", "")).strip()
             if not text:
-                print(f"⚠️ Skipping empty text entry: {entry}")
                 continue
 
-            # Create embedding
             embedding = client.embeddings.create(
                 model="text-embedding-3-small",
                 input=text
             ).data[0].embedding
 
-            # Stable ID priority: JSON id → date → fallback index
-            stable_id = str(
-                entry.get("id") or
-                entry.get("date") or
-                f"entry-{i}-{j}"
-            )
+            metadata = {
+                "text": text,
+                "title": entry.get("title", "Untitled"),
+                "date": entry.get("date", "1970-01-01"),  # fallback
+                "tags": entry.get("tags", []),
+                "category": entry.get("category", "journal")
+            }
 
-            # Build Pinecone vector with enriched metadata
             vectors.append({
-                "id": stable_id,
+                "id": str(entry.get("id", f"entry-{i}")),
                 "values": embedding,
-                "metadata": {
-                    "text": text,
-                    "title": entry.get("title", "Untitled"),
-                    "tags": entry.get("tags", []),
-                    "category": entry.get("category", "uncategorized"),
-                    "date": entry.get("date", ""),
-                    "date_friendly": entry.get("date_friendly", "")
-                }
+                "metadata": metadata
             })
 
         except Exception as e:
-            print(f"❌ Skipping entry due to error: {e}, entry: {entry}")
-            continue
+            print(f"❌ Skipping entry due to error: {e}")
 
     if vectors:
         index.upsert(vectors)
         uploaded_count += len(vectors)
-        print(f"✅ Uploaded {len(vectors)} entries in batch {i // batch_size + 1}")
-    else:
-        print(f"⚠️ No valid entries in batch {i // batch_size + 1}")
+        print(f"✅ Uploaded {len(vectors)} entries in batch {i//batch_size+1}")
 
-print(f"\n🎉 Migration complete! Total successful entries: {uploaded_count}/{len(entries)}")
+print(f"\n🎉 Finished migration! Total uploaded: {uploaded_count}/{len(entries)}")
