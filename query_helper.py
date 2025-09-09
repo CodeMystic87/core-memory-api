@@ -51,8 +51,9 @@ def universal_query(index, date=None, keyword=None, tag=None, semantic=None, top
 
             matches = []
             for match in semantic_res.get("matches", []):
-                text = match["metadata"].get("text", "").lower()
-                if keyword.lower() in text:
+                meta = match.get("metadata", {})
+                raw_text = meta.get("text") or meta.get("content") or meta.get("body", "")
+                if keyword.lower() in raw_text.lower():
                     matches.append(match)
 
             res = {"matches": matches[:top_k]}
@@ -93,9 +94,15 @@ def universal_query(index, date=None, keyword=None, tag=None, semantic=None, top
 
     for match in res["matches"]:
         meta = match.get("metadata", {})
-        print("📌 Title:", meta.get("title"))
-        print("📝 Text:", meta.get("text", "")[:200])
-        print("Date:", meta.get("date"))
-        print("Tags:", meta.get("tags"))
-        print("-" * 50)
 
+        # Auto-detect fields
+        title = meta.get("title") or meta.get("heading") or "Untitled"
+        raw_text = meta.get("text") or meta.get("content") or meta.get("body") or ""
+        date_val = meta.get("date") or meta.get("created_at") or "Unknown"
+        tags_val = meta.get("tags") or meta.get("categories") or []
+
+        print("📌 Title:", title)
+        print("📝 Text:", raw_text[:200])
+        print("Date:", date_val)
+        print("Tags:", tags_val)
+        print("-" * 50)
