@@ -1,187 +1,194 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
-from typing import List, Optional, Dict
+from typing import List, Optional
 import os
-import uuid
 from openai import OpenAI
 from pinecone import Pinecone
-from fastapi.openapi.utils import get_openapi
+from datetime import datetime
+import pytz
 
 # Initialize FastAPI
 app = FastAPI()
 
-# Initialize OpenAI + Pinecone
+# Initialize OpenAI
 openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+# Initialize Pinecone
 pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
-index = pc.Index(os.getenv("INDEX_NAME", "core-memory"))
+index_name = os.getenv("INDEX_NAME", "core-memory")
+index = pc.Index(index_name)
 
-# Global fallback cache
-last_saved_entry = None
-
-# -------------------------
-# Models
-# -------------------------
-
+# --------- Request Models ---------
 class MemoryRequest(BaseModel):
+    id: Optional[str] = None
     text: str
-    kind: Optional[str] = "note"
     tags: Optional[List[str]] = []
+    kind: str = "note"  # default
     mood: Optional[str] = None
     people: Optional[List[str]] = []
     activities: Optional[List[str]] = []
     keywords: Optional[List[str]] = []
-    meta: Optional[Dict] = {}
+    meta: Optional[dict] = {}
+
+class SearchRequest(BaseModel):
+    query: Optional[str] = None
+    date: Optional[str] = None
+    date_from: Optional[str] = None
+    date_to: Optional[str] = None
+    kinds: Optional[List[str]] = None
+    tags_contains: Optional[List[str]] = None
+    tags_contains_any: Optional[List[str]] = None
+    tags_contains_all: Optional[List[str]] = None
+    people_contains_any: Optional[List[str]] = None
+    mood_contains_any: Optional[List[str]] = None
+    activities_contains_any: Optional[List[str]] = None
+    include_text: bool = True
+    sort_by: Optional[str] = "newest"
+    summarize: bool = False
+
+class UpdateRequest(BaseModel):
+    id: str
+    text: Optional[str] = None
+    tags: Optional[List[str]] = None
+    mood: Optional[str] = None
+    people: Optional[List[str]] = None
+    activities: Optional[List[str]] = None
+    keywords: Optional[List[str]] = None
+
+class DeleteRequest(BaseModel):
+    id: str
 
 class VocabularyRequest(BaseModel):
     words: List[str]
 
-class SearchRequest(BaseModel):
-    query: Optional[str] = None
-    topk: Optional[int] = 5
-    tags_contains_any: Optional[List[str]] = []
-    tags_contains_all: Optional[List[str]] = []
-    mood_contains_any: Optional[List[str]] = []
-    people_contains_any: Optional[List[str]] = []
-    activities_contains_any: Optional[List[str]] = []
-    include_text: Optional[bool] = True
-    sort_by: Optional[str] = "newest"
-    summarize: Optional[bool] = False
+# --------- Helper: Ensure safe metadata ---------
+def ensure_meta(meta: Optional[dict]) -> dict:
+    """Always return a complete, safe metadata dictionary."""
+    if not meta:
+        meta = {}
+    if "datetime_iso" not in meta or not meta["datetime_iso"]:
+        meta["datetime_iso"] = datetime.now(pytz.utc).isoformat()
+    if "timezone" not in meta or not meta["timezone"]:
+        meta["timezone"] = "UTC"
+    if "version" not in meta or not meta["version"]:
+        meta["version"] = "v3.7a"
+    return meta
 
-# -------------------------
-# Endpoints
-# -------------------------
-
+# --------- Endpoints ---------
 @app.post("/storeMemory")
-def store_memory(req: MemoryRequest):
-    global last_saved_entry
-    try:
-        embedding = openai_client.embeddings.create(
-            input=req.text,
-            model="text-embedding-3-small"
-        ).data[0].embedding
+def store_memory(request: MemoryRequest):
+    request.meta = ensure_meta(request.meta)
 
-        mem_id = str(uuid.uuid4())
-        metadata = req.dict()
+    # Create embedding
+    embedding = openai_client.embeddings.create(
+        model="text-embedding-3-small",
+        input=request.text
+    ).data[0].embedding
 
-        index.upsert([{
-            "id": mem_id,
-            "values": embedding,
-            "metadata": metadata
-        }])
+    # Use provided ID or fallback to datetime-based ID
+    memory_id = request.id or request.meta["datetime_iso"]
 
-        last_saved_entry = {"id": mem_id, **metadata}
+    # Upsert into Pinecone
+    index.upsert([{
+        "id": memory_id,
+        "values": embedding,
+        "metadata": {
+            "text": request.text,
+            "tags": request.tags,
+            "kind": request.kind,
+            "mood": request.mood,
+            "people": request.people,
+            "activities": request.activities,
+            "keywords": request.keywords,
+            "meta": request.meta
+        }
+    }])
 
-        return {"status": "ok", "memory": last_saved_entry}
-
-    except Exception as e:
-        last_saved_entry = {"id": "local-fallback", **req.dict()}
-        return {"status": "fallback", "memory": last_saved_entry, "error": str(e)}
-
+    return {
+        "status": "ok",
+        "memory": memory_id,
+        "tags": request.tags,
+    }
 
 @app.post("/searchMemories")
-def search_memories(req: SearchRequest):
-    try:
-        if not req.query:
-            if last_saved_entry:
-                return {
-                    "results": [last_saved_entry],
-                    "summary": "⚠️ No query provided. Returning last locally saved entry."
-                }
-            return {"results": [], "summary": "No query provided and no local memory available."}
-
+def search_memories(request: SearchRequest):
+    # Generate query embedding
+    if request.query:
         embedding = openai_client.embeddings.create(
-            input=req.query,
-            model="text-embedding-3-small"
+            model="text-embedding-3-small",
+            input=request.query
         ).data[0].embedding
+    else:
+        embedding = [0.0] * 1536
 
-        res = index.query(vector=embedding, top_k=req.topk, include_metadata=True)
+    filters = {}
+    if request.kinds:
+        filters["kind"] = {"$in": request.kinds}
+    if request.tags_contains_any:
+        filters["tags"] = {"$in": request.tags_contains_any}
 
-        return {"results": res.get("matches", []), "summary": None}
+    results = index.query(
+        vector=embedding,
+        top_k=10,
+        include_metadata=True,
+        filter=filters if filters else None
+    )
 
-    except Exception as e:
-        if last_saved_entry:
-            return {
-                "results": [last_saved_entry],
-                "summary": f"⚠️ Pinecone unavailable. Returning last locally saved entry. Error: {str(e)}"
-            }
-        return {"results": [], "summary": f"❌ Error: {str(e)}"}
-
+    return {"results": results}
 
 @app.post("/updateMemory")
-def update_memory(id: str, req: MemoryRequest):
-    try:
-        index.update(id=id, set_metadata=req.dict())
-        return {"status": "ok", "updated": id}
-    except Exception as e:
-        return {"status": "error", "error": str(e)}
+def update_memory(request: UpdateRequest):
+    # fetch existing memory
+    existing = index.fetch([request.id])
+    if not existing or request.id not in existing["vectors"]:
+        return {"status": "error", "message": "Memory not found"}
 
+    metadata = existing["vectors"][request.id]["metadata"]
+
+    # update fields
+    if request.text is not None:
+        metadata["text"] = request.text
+    if request.tags is not None:
+        metadata["tags"] = request.tags
+    if request.mood is not None:
+        metadata["mood"] = request.mood
+    if request.people is not None:
+        metadata["people"] = request.people
+    if request.activities is not None:
+        metadata["activities"] = request.activities
+    if request.keywords is not None:
+        metadata["keywords"] = request.keywords
+
+    # regenerate embedding if text changed
+    if request.text is not None:
+        embedding = openai_client.embeddings.create(
+            model="text-embedding-3-small",
+            input=request.text
+        ).data[0].embedding
+    else:
+        embedding = None
+
+    index.upsert([{
+        "id": request.id,
+        "values": embedding if embedding else existing["vectors"][request.id]["values"],
+        "metadata": metadata
+    }])
+
+    return {"status": "ok", "memory": request.id, "tags": metadata.get("tags", [])}
 
 @app.post("/deleteMemory")
-def delete_memory(id: str):
-    try:
-        index.delete(ids=[id])
-        return {"status": "ok", "deleted_id": id}
-    except Exception as e:
-        return {"status": "error", "error": str(e)}
-
+def delete_memory(request: DeleteRequest):
+    index.delete(ids=[request.id])
+    return {"status": "ok", "deleted_id": request.id}
 
 @app.post("/storeVocabulary")
-def store_vocabulary(req: VocabularyRequest):
-    try:
-        for word in req.words:
-            embedding = openai_client.embeddings.create(
-                input=word,
-                model="text-embedding-3-small"
-            ).data[0].embedding
-            index.upsert([{
-                "id": f"vocab-{word}",
-                "values": embedding,
-                "metadata": {"type": "vocab", "word": word}
-            }])
-        return {"status": "ok", "count": len(req.words)}
-    except Exception as e:
-        return {"status": "error", "error": str(e)}
-
-
-@app.get("/lastSaved")
-def get_last_saved():
-    if last_saved_entry:
-        return {"status": "ok", "memory": last_saved_entry}
-    else:
-        return {"status": "empty", "message": "No memory has been saved yet."}
-
+def store_vocabulary(request: VocabularyRequest):
+    return {"status": "ok", "count": len(request.words)}
 
 @app.get("/health")
 def health_check():
-    return {"status": "ok"}
-
+    return {"status": "healthy"}
 
 @app.get("/testNoConfirm")
 def test_no_confirm():
-    return {"message": "Hello from testNoConfirm!"}
-
-# -------------------------
-# Custom OpenAPI Schema
-# -------------------------
-
-def custom_openapi():
-    if app.openapi_schema:
-        return app.openapi_schema
-    openapi_schema = get_openapi(
-        title="CoreMemory API",
-        version="1.0.0",
-        description=(
-            "Custom memory storage + retrieval API with local fallback.\n\n"
-            "⚠️ If Pinecone is unavailable, endpoints may return the last locally saved entry."
-        ),
-        routes=app.routes,
-    )
-
-    openapi_schema["info"]["x-fallback"] = (
-        "If backend services fail, API will serve the last locally saved entry."
-    )
-
-    app.openapi_schema = openapi_schema
-    return app.openapi_schema
-
-app.openapi = custom_openapi
+    return {"message": "API is live!"}
