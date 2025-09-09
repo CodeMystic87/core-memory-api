@@ -1,0 +1,39 @@
+import os
+import json
+from pinecone import Pinecone
+
+print("🚀 Running export_live_memories.py...")
+
+# === Initialize Pinecone ===
+pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
+index = pc.Index("core-memory")
+
+# === Query for live memories (Sept 1, 2025 and later) ===
+print("📦 Fetching live memories from Pinecone...")
+results = index.query(
+    vector=[0]*1536,
+    top_k=10000,  # large enough to cover all
+    include_metadata=True,
+    filter={"date": {"$gte": "2025-09-01"}}
+)
+
+matches = results.get("matches", [])
+print(f"✅ Found {len(matches)} live memories.")
+
+# === Save to JSONL ===
+output_path = "live_memories.jsonl"
+with open(output_path, "w", encoding="utf-8") as f:
+    for match in matches:
+        meta = match.get("metadata", {})
+        entry = {
+            "id": match.get("id"),
+            "title": meta.get("title"),
+            "text": meta.get("text"),
+            "tags": meta.get("tags", []),
+            "categories": meta.get("categories", []),
+            "date": meta.get("date"),
+            "date_friendly": meta.get("date_friendly", meta.get("date"))
+        }
+        f.write(json.dumps(entry) + "\n")
+
+print(f"💾 Export complete! Saved to {output_path}")
