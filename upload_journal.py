@@ -2,78 +2,91 @@ import os
 import json
 from openai import OpenAI
 import pinecone
+from datetime import datetime
 
-print("🚀 upload_journal.py has started running...")
+print("🚀 upload_journal.py has started...")
 
-# Initialize OpenAI
+# === Initialize OpenAI ===
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-# Initialize Pinecone
+# === Initialize Pinecone ===
 pc = pinecone.Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
 index = pc.Index("core-memory")
 
-# Path to your JSONL file
+# === Path to your journal file (already in GitHub repo) ===
 file_path = "journal_with_tags_and_categories.jsonl"
 
-print("📂 Checking for journal file...")
 if not os.path.exists(file_path):
     print(f"❌ File not found: {file_path}")
     exit(1)
 
-# Load entries
+# === Load entries ===
 with open(file_path, "r", encoding="utf-8") as f:
     entries = [json.loads(line) for line in f]
 
-print(f"✅ Loaded {len(entries)} journal entries")
+print(f"📖 Loaded {len(entries)} journal entries.")
 
-# Process in batches
-batch_size = 100
-uploaded_count = 0
+# === Normalize date ===
+def normalize_date(date_str):
+    try:
+        dt = datetime.strptime(date_str, "%Y-%m-%d")
+        return dt.strftime("%Y-%m-%d"), dt.strftime("%B %d, %Y")
+    except Exception:
+        return None, date_str  # fallback if invalid
 
-for i in range(0, len(entries), batch_size):
-    batch = entries[i:i + batch_size]
-    vectors = []
+# === Upload in batches ===
+batch_size = 50
+uploaded = 0
+batch = []
 
-    for j, entry in enumerate(batch):
-        try:
-            # Safely coerce text to string
-            raw_text = entry.get("text", "")
-            text = str(raw_text).strip()
+for i, entry in enumerate(entries):
+    text = entry.get("text", "").strip()
+    if not text:
+        continue
 
-            # Skip empty or invalid text
-            if not text:
-                print(f"⚠️ Skipping empty text entry: {entry}")
-                continue
+    title = entry.get("title", f"Journal Entry {i}")
+    tags = entry.get("tags", [])
+    categories = entry.get("categories", [])
+    raw_date = entry.get("date", "")
 
-            # Create embedding
-            embedding = client.embeddings.create(
-                model="text-embedding-3-small",
-                input=text
-            ).data[0].embedding
+    date_iso, date_friendly = normalize_date(raw_date)
 
-            # Build Pinecone vector
-            vectors.append({
-                "id": str(entry.get("id", f"entry-{i}-{j}")),  # unique fallback
-                "values": embedding,
-                "metadata": {
-                    "text": text,
-                    "title": entry.get("title", "Untitled"),
-                    "tags": entry.get("tags", []),
-                    "category": entry.get("category", "uncategorized"),
-                    "date": entry.get("date", ""),
-                    "date_friendly": entry.get("date_friendly", "")
-                }
-            })
+    # Create embedding
+    embedding = client.embeddings.create(
+        model="text-embedding-3-small",
+        input=f"{title}\n{text}"
+    ).data[0].embedding
 
-        except Exception as e:
-            print(f"❌ Skipping entry due to error: {e}, entry: {entry}")
-            continue
+    # Build metadata
+    metadata = {
+        "type": "journal",
+        "title": title,
+        "text": text,
+        "tags": tags,
+        "categories": categories,
+        "date": date_iso,
+        "date_friendly": date_friendly,
+    }
 
-    if vectors:
-        index.upsert(vectors)
-        uploaded_count += len(vectors)
-        print(f"✅ Uploaded {len(vectors)} entries in batch {i // batch_size + 1}")
-    else:
-        print(f"⚠️ No valid entries in batch {i // batch_size + 1}")
+    # Use stable ID (date + index)
+    vector_id = f"journal-{date_iso or 'unknown'}-{i}"
 
-print(f"\n🎉 Finished uploading! Total successful entries: {uploaded_count}/{len(entries)}")
+    batch.append({
+        "id": vector_id,
+        "values": embedding,
+        "metadata": metadata
+    })
+
+    # Upload every 50
+    if len(batch) >= batch_size:
+        index.upsert(vectors=batch)
+        uploaded += len(batch)
+        print(f"✅ Uploaded {uploaded}/{len(entries)} so far...")
+        batch = []
+
+# Upload remaining
+if batch:
+    index.upsert(vectors=batch)
+    uploaded += len(batch)
+
+print(f"🎉 Finished! Uploaded {uploaded}/{len(entries)} journal entries.")
