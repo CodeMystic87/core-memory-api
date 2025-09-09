@@ -1,144 +1,154 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
-from typing import List, Optional, Dict
+from typing import List, Optional
 import os
 from openai import OpenAI
 from pinecone import Pinecone
-import uuid
 
 # Initialize FastAPI
 app = FastAPI()
 
-# Initialize OpenAI + Pinecone
+# Initialize OpenAI
 openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+# Initialize Pinecone
 pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
-index = pc.Index("core-memory")
+index = pc.Index(os.getenv("INDEX_NAME", "core-memory"))
 
-# -------------------------
-# Models
-# -------------------------
+# Local fallback memory tracker
+last_saved_entry = None
 
+# Request Models
 class MemoryRequest(BaseModel):
     text: str
-    kind: str = "note"
     tags: Optional[List[str]] = []
-    metadata: Optional[Dict] = {}
-
-class SearchRequest(BaseModel):
-    query: Optional[str] = None
-    topk: int = 5
-    tags_contains: Optional[List[str]] = []
-    summarize: bool = False
-
-class UpdateRequest(BaseModel):
-    id: str
-    text: Optional[str] = None
-    tags: Optional[List[str]] = None
-    metadata: Optional[Dict] = None
-
-class DeleteRequest(BaseModel):
-    id: str
+    mood: Optional[str] = None
+    people: Optional[List[str]] = []
+    activities: Optional[List[str]] = []
+    keywords: Optional[List[str]] = []
+    kind: Optional[str] = "note"  # default type
+    meta: Optional[dict] = {}
 
 class VocabularyRequest(BaseModel):
     words: List[str]
 
-# -------------------------
-# Endpoints
-# -------------------------
+class SearchRequest(BaseModel):
+    query: Optional[str] = None  # allow empty queries
+    topk: Optional[int] = 5
+    tags_contains_any: Optional[List[str]] = []
+    tags_contains_all: Optional[List[str]] = []
+    mood_contains_any: Optional[List[str]] = []
+    people_contains_any: Optional[List[str]] = []
+    activities_contains_any: Optional[List[str]] = []
+    include_text: Optional[bool] = True
+    sort_by: Optional[str] = "newest"
+    summarize: Optional[bool] = False
+
+# ========== ROUTES ==========
 
 @app.post("/storeMemory")
 def store_memory(req: MemoryRequest):
-    embedding = openai_client.embeddings.create(
-        input=req.text,
-        model="text-embedding-3-small"
-    ).data[0].embedding
+    global last_saved_entry
+    try:
+        # Create embedding
+        embedding = openai_client.embeddings.create(
+            input=req.text,
+            model="text-embedding-3-small"
+        ).data[0].embedding
 
-    mem_id = str(uuid.uuid4())
-    metadata = req.metadata or {}
-    metadata.update({"kind": req.kind, "tags": req.tags})
+        # Store in Pinecone
+        index.upsert([{
+            "id": req.meta.get("datetime_iso", req.text[:50]),
+            "values": embedding,
+            "metadata": req.dict()
+        }])
 
-    index.upsert([{
-        "id": mem_id,
-        "values": embedding,
-        "metadata": metadata
-    }])
+        # Save fallback locally
+        last_saved_entry = req.dict()
 
-    return {"status": "ok", "memory": req.text, "id": mem_id}
+        return {"status": "ok", "memory": req.dict()}
+
+    except Exception as e:
+        # API fallback mode
+        last_saved_entry = req.dict()
+        return {"status": "local-only", "error": str(e), "memory": req.dict()}
 
 
 @app.post("/searchMemories")
 def search_memories(req: SearchRequest):
-    query_text = req.query or ""   # fallback if query is None
-    topk = req.topk or 10
-
-    # If no query provided, just return the most recent entries
-    if not query_text.strip():
-        # fetch latest N entries directly from Pinecone
-        res = index.query(
-            vector=[0.0] * 1536,   # dummy vector
-            top_k=topk,
-            include_metadata=True
-        )
-        return {"results": res["matches"]}
-
-    # Otherwise, run the normal embedding search
     try:
+        # If no query, return last saved entry
+        if not req.query:
+            if last_saved_entry:
+                return {
+                    "results": [last_saved_entry],
+                    "summary": "⚠️ API query skipped. Returning last locally saved entry."
+                }
+            return {"results": [], "summary": "No query provided and no local memory available."}
+
+        # Generate embedding for query
         embedding = openai_client.embeddings.create(
-            input=query_text,
+            input=req.query,
             model="text-embedding-3-small"
         ).data[0].embedding
 
-        res = index.query(
-            vector=embedding,
-            top_k=topk,
-            include_metadata=True
-        )
-        return {"results": res["matches"]}
-    except Exception as e:
-        return {"error": str(e)}
+        # Query Pinecone
+        res = index.query(vector=embedding, top_k=req.topk, include_metadata=True)
 
+        return {"results": res.get("matches", []), "summary": None}
+
+    except Exception as e:
+        # Fallback if Pinecone fails
+        if last_saved_entry:
+            return {
+                "results": [last_saved_entry],
+                "summary": f"⚠️ Pinecone unavailable. Returning last locally saved entry. Error: {str(e)}"
+            }
+        return {"results": [], "summary": f"❌ Error: {str(e)}"}
 
 
 @app.post("/updateMemory")
-def update_memory(req: UpdateRequest):
-    # Fetch current memory
-    res = index.fetch(ids=[req.id])
-    if req.id not in res.vectors:
-        return {"error": "Memory not found"}
-
-    current = res.vectors[req.id]
-    new_text = req.text if req.text else current["metadata"].get("text", "")
-    embedding = openai_client.embeddings.create(
-        input=new_text,
-        model="text-embedding-3-small"
-    ).data[0].embedding
-
-    metadata = current["metadata"]
-    if req.tags is not None:
-        metadata["tags"] = req.tags
-    if req.metadata is not None:
-        metadata.update(req.metadata)
-
-    index.upsert([{
-        "id": req.id,
-        "values": embedding,
-        "metadata": metadata
-    }])
-
-    return {"status": "updated", "id": req.id}
+def update_memory(id: str, req: MemoryRequest):
+    try:
+        # Just overwrite metadata in Pinecone
+        index.update(id=id, set_metadata=req.dict())
+        return {"status": "ok", "updated": id}
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
 
 
 @app.post("/deleteMemory")
-def delete_memory(req: DeleteRequest):
-    index.delete(ids=[req.id])
-    return {"status": "deleted", "id": req.id}
+def delete_memory(id: str):
+    try:
+        index.delete(ids=[id])
+        return {"status": "ok", "deleted_id": id}
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
 
 
 @app.post("/storeVocabulary")
 def store_vocabulary(req: VocabularyRequest):
-    return {"status": "ok", "count": len(req.words), "words": req.words}
+    try:
+        for word in req.words:
+            embedding = openai_client.embeddings.create(
+                input=word,
+                model="text-embedding-3-small"
+            ).data[0].embedding
+            index.upsert([{
+                "id": f"vocab-{word}",
+                "values": embedding,
+                "metadata": {"type": "vocab", "word": word}
+            }])
+        return {"status": "ok", "count": len(req.words)}
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
 
 
 @app.get("/health")
 def health_check():
     return {"status": "ok"}
+
+
+@app.get("/testNoConfirm")
+def test_no_confirm():
+    return {"message": "Hello from testNoConfirm!"}
