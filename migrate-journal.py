@@ -51,17 +51,24 @@ for i in range(0, len(entries), batch_size):
                 input=text
             ).data[0].embedding
 
-            # Build Pinecone vector with dates included
+            # Stable ID priority: JSON id → date → fallback index
+            stable_id = str(
+                entry.get("id") or
+                entry.get("date") or
+                f"entry-{i}-{j}"
+            )
+
+            # Build Pinecone vector with enriched metadata
             vectors.append({
-                "id": str(entry.get("id", f"entry-{i}-{j}")),  # unique fallback
+                "id": stable_id,
                 "values": embedding,
                 "metadata": {
                     "text": text,
                     "title": entry.get("title", "Untitled"),
                     "tags": entry.get("tags", []),
                     "category": entry.get("category", "uncategorized"),
-                    "date": entry.get("date", ""),  # 🔥 Added date
-                    "date_friendly": entry.get("date_friendly", "")  # 🔥 Added friendly date
+                    "date": entry.get("date", ""),
+                    "date_friendly": entry.get("date_friendly", "")
                 }
             })
 
