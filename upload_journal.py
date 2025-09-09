@@ -3,50 +3,67 @@ import json
 from openai import OpenAI
 import pinecone
 
-# === Config ===
-INPUT_FILE = "core_memory_api/journal_fixed.jsonl"   # <- updated to fixed journal file
-INDEX_NAME = "core-memory"
+# Input file – make sure this matches your migrated journal
+INPUT_FILE = "core_memory_api/journal_fixed.jsonl"
 
-# === Initialize OpenAI ===
+# Initialize clients
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-
-# === Initialize Pinecone ===
 pc = pinecone.Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
-index = pc.Index(INDEX_NAME)
+index = pc.Index("core-memory")
+
+
+def embed_text(text):
+    """Generate embeddings safely from OpenAI."""
+    response = client.embeddings.create(
+        input=text,
+        model="text-embedding-3-small"
+    )
+    return response.data[0].embedding
+
 
 def upload_entries():
-    print(f"📂 Using journal file: {INPUT_FILE}")
+    """Upload journal entries into Pinecone index."""
     with open(INPUT_FILE, "r", encoding="utf-8") as infile:
-        for i, line in enumerate(infile, start=1):
+        for line in infile:
+            if not line.strip():
+                continue
             entry = json.loads(line)
 
-            # Ensure every entry has a kind (fallback if migration missed one)
-            if "kind" not in entry:
-                entry["kind"] = "journal"
+            # Extract fields safely
+            text = str(entry.get("text", "")).strip()
+            if not text:
+                continue
 
-            text = entry.get("text", "")
-            if not text.strip():
-                continue  # skip empty entries
+            kind = entry.get("kind", "journal")
+            title = str(entry.get("title", ""))
+            tags = entry.get("tags", [])
+            if isinstance(tags, (float, int)):
+                tags = [str(tags)]
 
-            # Create embedding
-            embedding = client.embeddings.create(
-                model="text-embedding-3-small",
-                input=text
-            ).data[0].embedding
+            metadata = {
+                "kind": kind,
+                "title": title,
+                "tags": [str(tag) for tag in tags],
+                "mood": str(entry.get("mood", "")),
+                "people": [str(p) for p in entry.get("people", [])],
+                "activities": [str(a) for a in entry.get("activities", [])],
+                "keywords": [str(k) for k in entry.get("keywords", [])],
+                "meta": entry.get("meta", {})
+            }
 
-            # Upsert into Pinecone
+            # Embed and upsert into Pinecone
+            embedding = embed_text(text)
             index.upsert([
                 (
-                    str(i),  # unique ID
+                    entry.get("id", str(hash(text))),  # fallback id
                     embedding,
-                    {"text": text, "tags": entry.get("tags", []), "kind": entry.get("kind", "journal")}
+                    metadata
                 )
             ])
 
-            if i % 50 == 0:
-                print(f"✅ Uploaded {i} entries...")
+    print("✅ Journal upload complete.")
 
-    print("🎉 Upload complete!")
 
 if __name__ == "__main__":
+    print(f"📓 Using journal file: {INPUT_FILE}")
     upload_entries()
