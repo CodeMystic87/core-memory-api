@@ -1,39 +1,42 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import List, Optional, Dict
 import os
+import uuid
 from openai import OpenAI
 from pinecone import Pinecone
+from fastapi.openapi.utils import get_openapi
 
 # Initialize FastAPI
 app = FastAPI()
 
-# Initialize OpenAI
+# Initialize OpenAI + Pinecone
 openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-
-# Initialize Pinecone
 pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
 index = pc.Index(os.getenv("INDEX_NAME", "core-memory"))
 
-# Local fallback memory tracker
+# Global fallback cache
 last_saved_entry = None
 
-# Request Models
+# -------------------------
+# Models
+# -------------------------
+
 class MemoryRequest(BaseModel):
     text: str
+    kind: Optional[str] = "note"
     tags: Optional[List[str]] = []
     mood: Optional[str] = None
     people: Optional[List[str]] = []
     activities: Optional[List[str]] = []
     keywords: Optional[List[str]] = []
-    kind: Optional[str] = "note"  # default type
-    meta: Optional[dict] = {}
+    meta: Optional[Dict] = {}
 
 class VocabularyRequest(BaseModel):
     words: List[str]
 
 class SearchRequest(BaseModel):
-    query: Optional[str] = None  # allow empty queries
+    query: Optional[str] = None
     topk: Optional[int] = 5
     tags_contains_any: Optional[List[str]] = []
     tags_contains_all: Optional[List[str]] = []
@@ -44,61 +47,58 @@ class SearchRequest(BaseModel):
     sort_by: Optional[str] = "newest"
     summarize: Optional[bool] = False
 
-# ========== ROUTES ==========
+# -------------------------
+# Endpoints
+# -------------------------
 
 @app.post("/storeMemory")
 def store_memory(req: MemoryRequest):
     global last_saved_entry
     try:
-        # Create embedding
         embedding = openai_client.embeddings.create(
             input=req.text,
             model="text-embedding-3-small"
         ).data[0].embedding
 
-        # Store in Pinecone
+        mem_id = str(uuid.uuid4())
+        metadata = req.dict()
+
         index.upsert([{
-            "id": req.meta.get("datetime_iso", req.text[:50]),
+            "id": mem_id,
             "values": embedding,
-            "metadata": req.dict()
+            "metadata": metadata
         }])
 
-        # Save fallback locally
-        last_saved_entry = req.dict()
+        last_saved_entry = {"id": mem_id, **metadata}
 
-        return {"status": "ok", "memory": req.dict()}
+        return {"status": "ok", "memory": last_saved_entry}
 
     except Exception as e:
-        # API fallback mode
-        last_saved_entry = req.dict()
-        return {"status": "local-only", "error": str(e), "memory": req.dict()}
+        last_saved_entry = {"id": "local-fallback", **req.dict()}
+        return {"status": "fallback", "memory": last_saved_entry, "error": str(e)}
 
 
 @app.post("/searchMemories")
 def search_memories(req: SearchRequest):
     try:
-        # If no query, return last saved entry
         if not req.query:
             if last_saved_entry:
                 return {
                     "results": [last_saved_entry],
-                    "summary": "⚠️ API query skipped. Returning last locally saved entry."
+                    "summary": "⚠️ No query provided. Returning last locally saved entry."
                 }
             return {"results": [], "summary": "No query provided and no local memory available."}
 
-        # Generate embedding for query
         embedding = openai_client.embeddings.create(
             input=req.query,
             model="text-embedding-3-small"
         ).data[0].embedding
 
-        # Query Pinecone
         res = index.query(vector=embedding, top_k=req.topk, include_metadata=True)
 
         return {"results": res.get("matches", []), "summary": None}
 
     except Exception as e:
-        # Fallback if Pinecone fails
         if last_saved_entry:
             return {
                 "results": [last_saved_entry],
@@ -110,7 +110,6 @@ def search_memories(req: SearchRequest):
 @app.post("/updateMemory")
 def update_memory(id: str, req: MemoryRequest):
     try:
-        # Just overwrite metadata in Pinecone
         index.update(id=id, set_metadata=req.dict())
         return {"status": "ok", "updated": id}
     except Exception as e:
@@ -144,6 +143,14 @@ def store_vocabulary(req: VocabularyRequest):
         return {"status": "error", "error": str(e)}
 
 
+@app.get("/lastSaved")
+def get_last_saved():
+    if last_saved_entry:
+        return {"status": "ok", "memory": last_saved_entry}
+    else:
+        return {"status": "empty", "message": "No memory has been saved yet."}
+
+
 @app.get("/health")
 def health_check():
     return {"status": "ok"}
@@ -152,3 +159,29 @@ def health_check():
 @app.get("/testNoConfirm")
 def test_no_confirm():
     return {"message": "Hello from testNoConfirm!"}
+
+# -------------------------
+# Custom OpenAPI Schema
+# -------------------------
+
+def custom_openapi():
+    if app.openapi_schema:
+        return app.openapi_schema
+    openapi_schema = get_openapi(
+        title="CoreMemory API",
+        version="1.0.0",
+        description=(
+            "Custom memory storage + retrieval API with local fallback.\n\n"
+            "⚠️ If Pinecone is unavailable, endpoints may return the last locally saved entry."
+        ),
+        routes=app.routes,
+    )
+
+    openapi_schema["info"]["x-fallback"] = (
+        "If backend services fail, API will serve the last locally saved entry."
+    )
+
+    app.openapi_schema = openapi_schema
+    return app.openapi_schema
+
+app.openapi = custom_openapi
