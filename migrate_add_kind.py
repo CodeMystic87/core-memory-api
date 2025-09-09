@@ -1,4 +1,4 @@
-mport json
+import json
 
 INPUT_FILE = "journal_with_tags_and_categories.jsonl"
 OUTPUT_FILE = "journal_fixed.jsonl"
