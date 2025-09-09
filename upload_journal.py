@@ -1,53 +1,52 @@
 import os
-import sys
 import json
 from openai import OpenAI
 import pinecone
 
 print("🚀 upload_journal.py has started...")
 
-# === Load API keys ===
+# === Initialize OpenAI ===
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+# === Initialize Pinecone ===
 pc = pinecone.Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
 index = pc.Index("core-memory")
 
-# === Get input file path ===
-if len(sys.argv) > 1:
-    input_file = sys.argv[1]
-else:
-    input_file = os.path.join("core_memory_api", "journal_with_tags_and_categories.jsonl")
+# === Load Journal File ===
+file_path = "core_memory_api/journal_with_tags_and_categories.jsonl"
+print(f"📂 Using journal file: {file_path}")
 
-print(f"📂 Using journal file: {input_file}")
+with open(file_path, "r") as f:
+    for i, line in enumerate(f, 1):
+        try:
+            entry = json.loads(line)
+            text = entry.get("text", "").strip()
 
-if not os.path.exists(input_file):
-    raise FileNotFoundError(f"❌ File not found: {input_file}")
+            if not text:
+                print(f"⚠️ Skipping empty text entry at line {i}")
+                continue
 
-# === Upload entries ===
-with open(input_file, "r") as f:
-    for line in f:
-        entry = json.loads(line.strip())
-        text = entry.get("text", "")
-        meta = {
-            "title": entry.get("title", "Untitled"),
-            "date": entry.get("date"),
-            "tags": entry.get("tags", []),
-            "category": entry.get("category", "uncategorized"),
-            "date_friendly": entry.get("date_friendly", entry.get("date")),
-        }
+            # Generate embedding safely
+            try:
+                embedding = client.embeddings.create(
+                    model="text-embedding-3-small",
+                    input=text
+                ).data[0].embedding
+            except Exception as e:
+                print(f"⚠️ Failed to embed entry at line {i}, skipping. Error: {e}")
+                continue
 
-        # Create embedding
-        embedding = client.embeddings.create(
-            model="text-embedding-3-small",
-            input=text
-        ).data[0].embedding
-
-        # Upsert into Pinecone
-        index.upsert([
-            {
-                "id": entry.get("id", f"journal-{meta['date']}"),
+            # Insert into Pinecone
+            index.upsert([{
+                "id": f"journal-{i}",
                 "values": embedding,
-                "metadata": {"text": text, **meta}
-            }
-        ])
+                "metadata": entry
+            }])
 
-print("✅ Journal upload completed successfully!")
+            if i % 50 == 0:
+                print(f"✅ Processed {i} entries...")
+
+        except Exception as e:
+            print(f"⚠️ Failed to process line {i}, skipping. Error: {e}")
+
+print("🎉 Upload complete! Check Pinecone index for results.")
