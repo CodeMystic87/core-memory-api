@@ -3,55 +3,50 @@ import json
 from openai import OpenAI
 import pinecone
 
-# === Setup API clients ===
+# === Config ===
+INPUT_FILE = "core_memory_api/journal_fixed.jsonl"   # <- updated to fixed journal file
+INDEX_NAME = "core-memory"
+
+# === Initialize OpenAI ===
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+# === Initialize Pinecone ===
 pc = pinecone.Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
-index = pc.Index("core-memory")
+index = pc.Index(INDEX_NAME)
 
-# === Detect which journal file to use ===
-FIXED_FILE = "journal_fixed.jsonl"
-ORIGINAL_FILE = "journal_with_tags_and_categories.jsonl"
-
-if os.path.exists(FIXED_FILE):
-    INPUT_FILE = FIXED_FILE
-    print(f"📂 Using FIXED journal file: {INPUT_FILE}")
-elif os.path.exists(ORIGINAL_FILE):
-    INPUT_FILE = ORIGINAL_FILE
-    print(f"📂 Using ORIGINAL journal file: {INPUT_FILE}")
-else:
-    raise FileNotFoundError("❌ No journal file found!")
-
-# === Upload entries ===
-print(f"🚀 Upload starting with file: {INPUT_FILE}")
-
-with open(INPUT_FILE, "r", encoding="utf-8") as f:
-    for i, line in enumerate(f, start=1):
-        try:
+def upload_entries():
+    print(f"📂 Using journal file: {INPUT_FILE}")
+    with open(INPUT_FILE, "r", encoding="utf-8") as infile:
+        for i, line in enumerate(infile, start=1):
             entry = json.loads(line)
 
-            # Validate text
-            if not entry.get("text") or not entry["text"].strip():
-                print(f"⚠️ Skipping empty entry at line {i}")
-                continue
+            # Ensure every entry has a kind (fallback if migration missed one)
+            if "kind" not in entry:
+                entry["kind"] = "journal"
 
-            # Add embeddings
+            text = entry.get("text", "")
+            if not text.strip():
+                continue  # skip empty entries
+
+            # Create embedding
             embedding = client.embeddings.create(
                 model="text-embedding-3-small",
-                input=entry["text"]
+                input=text
             ).data[0].embedding
 
             # Upsert into Pinecone
             index.upsert([
                 (
-                    f"journal-{i}",
+                    str(i),  # unique ID
                     embedding,
-                    entry
+                    {"text": text, "tags": entry.get("tags", []), "kind": entry.get("kind", "journal")}
                 )
             ])
 
-            print(f"✅ Uploaded entry {i}")
+            if i % 50 == 0:
+                print(f"✅ Uploaded {i} entries...")
 
-        except Exception as e:
-            print(f"❌ Error on line {i}: {e}")
+    print("🎉 Upload complete!")
 
-print("🎉 Upload complete!")
+if __name__ == "__main__":
+    upload_entries()
