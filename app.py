@@ -1,92 +1,135 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import List, Optional, Dict
 import os
 from openai import OpenAI
 from pinecone import Pinecone
+import uuid
 
 # Initialize FastAPI
 app = FastAPI()
 
-# Initialize OpenAI
+# Initialize OpenAI + Pinecone
 openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-
-# Initialize Pinecone
 pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
-index_name = os.getenv("INDEX_NAME", "core-memory")
-index = pc.Index(index_name)
+index = pc.Index("core-memory")
 
-# ---------- Request Models ----------
+# -------------------------
+# Models
+# -------------------------
+
 class MemoryRequest(BaseModel):
     text: str
+    kind: str = "note"
     tags: Optional[List[str]] = []
+    metadata: Optional[Dict] = {}
+
+class SearchRequest(BaseModel):
+    query: Optional[str] = None
+    topk: int = 5
+    tags_contains: Optional[List[str]] = []
+    summarize: bool = False
+
+class UpdateRequest(BaseModel):
+    id: str
+    text: Optional[str] = None
+    tags: Optional[List[str]] = None
+    metadata: Optional[Dict] = None
+
+class DeleteRequest(BaseModel):
+    id: str
 
 class VocabularyRequest(BaseModel):
     words: List[str]
 
-class SearchRequest(BaseModel):
-    query: Optional[str] = None       # ✅ Now optional
-    topk: int = 10
-    date: Optional[str] = None
-    date_from: Optional[str] = None
-    date_to: Optional[str] = None
-    kinds: Optional[List[str]] = []
-    tags: Optional[List[str]] = []
-    tags_contains_any: Optional[List[str]] = []
-    tags_contains_all: Optional[List[str]] = []
-    people_contains_any: Optional[List[str]] = []
-    mood_contains_any: Optional[List[str]] = []
-    activities_contains_any: Optional[List[str]] = []
-    include_text: bool = True
-    sort_by: str = "newest"
-    summarize: bool = False
+# -------------------------
+# Endpoints
+# -------------------------
 
-# ---------- Endpoints ----------
+@app.post("/storeMemory")
+def store_memory(req: MemoryRequest):
+    embedding = openai_client.embeddings.create(
+        input=req.text,
+        model="text-embedding-3-small"
+    ).data[0].embedding
+
+    mem_id = str(uuid.uuid4())
+    metadata = req.metadata or {}
+    metadata.update({"kind": req.kind, "tags": req.tags})
+
+    index.upsert([{
+        "id": mem_id,
+        "values": embedding,
+        "metadata": metadata
+    }])
+
+    return {"status": "ok", "memory": req.text, "id": mem_id}
+
+
 @app.post("/searchMemories")
-async def search_memories(req: SearchRequest):
-    embedding = None
-
-    # Case 1: Query exists → generate embedding from OpenAI
+def search_memories(req: SearchRequest):
+    query_vec = None
     if req.query:
-        embedding = openai_client.embeddings.create(
-            model="text-embedding-3-small",
-            input=req.query
+        query_vec = openai_client.embeddings.create(
+            input=req.query,
+            model="text-embedding-3-small"
         ).data[0].embedding
-        print("DEBUG - Using real embedding for query:", req.query)
     else:
-        # Case 2: No query → use dummy vector
-        embedding = [0.0] * 1536
-        print("DEBUG - No query provided. Using dummy embedding vector of length:", len(embedding))
+        return {"error": "No query provided"}
 
-    # Build filters
-    pinecone_filter = None
-    if req.tags:
-        pinecone_filter = {"tags": {"$in": req.tags}}
-        print("DEBUG - Pinecone filter applied:", pinecone_filter)
-    else:
-        print("DEBUG - No Pinecone filter applied")
+    res = index.query(vector=query_vec, top_k=req.topk, include_metadata=True)
 
-    # Run Pinecone query
-    results = index.query(
-        vector=embedding,
-        top_k=req.topk,
-        include_metadata=True,
-        filter=pinecone_filter
-    )
-    print("DEBUG - Pinecone returned", len(results["matches"]), "matches")
+    results = []
+    for match in res.matches:
+        results.append({
+            "id": match.id,
+            "score": match.score,
+            "metadata": match.metadata
+        })
 
-    matches = [
-        {
-            "id": match["id"],
-            "score": match["score"],
-            "metadata": match["metadata"]
-        }
-        for match in results["matches"]
-    ]
+    return {"results": results}
 
-    return {"results": matches}
+
+@app.post("/updateMemory")
+def update_memory(req: UpdateRequest):
+    # Fetch current memory
+    res = index.fetch(ids=[req.id])
+    if req.id not in res.vectors:
+        return {"error": "Memory not found"}
+
+    current = res.vectors[req.id]
+    new_text = req.text if req.text else current["metadata"].get("text", "")
+    embedding = openai_client.embeddings.create(
+        input=new_text,
+        model="text-embedding-3-small"
+    ).data[0].embedding
+
+    metadata = current["metadata"]
+    if req.tags is not None:
+        metadata["tags"] = req.tags
+    if req.metadata is not None:
+        metadata.update(req.metadata)
+
+    index.upsert([{
+        "id": req.id,
+        "values": embedding,
+        "metadata": metadata
+    }])
+
+    return {"status": "updated", "id": req.id}
+
+
+@app.post("/deleteMemory")
+def delete_memory(req: DeleteRequest):
+    index.delete(ids=[req.id])
+    return {"status": "deleted", "id": req.id}
+
+
+@app.post("/storeVocabulary")
+def store_vocabulary(req: VocabularyRequest):
+    return {"status": "ok", "count": len(req.words), "words": req.words}
+
 
 @app.get("/health")
-async def health_check():
-    print("DEBUG - Health check called")
+def health_check():
     return {"status": "ok"}
