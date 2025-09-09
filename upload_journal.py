@@ -21,49 +21,42 @@ def embed_text(text):
     return response.data[0].embedding
 
 
+def clean_metadata(meta):
+    """Ensure Pinecone metadata is valid: only str, number, bool, or list[str]."""
+    if not meta or not isinstance(meta, dict):
+        return {}
+    cleaned = {}
+    for k, v in meta.items():
+        if isinstance(v, (str, int, float, bool)):
+            cleaned[k] = v
+        elif isinstance(v, list) and all(isinstance(x, str) for x in v):
+            cleaned[k] = v
+        else:
+            cleaned[k] = str(v)  # fallback: stringify
+    return cleaned
+
+
 def upload_entries():
-    """Upload journal entries into Pinecone index."""
+    print(f"✅ Using journal file: {INPUT_FILE}")
     with open(INPUT_FILE, "r", encoding="utf-8") as infile:
         for line in infile:
             if not line.strip():
                 continue
             entry = json.loads(line)
 
-            # Extract fields safely
-            text = str(entry.get("text", "")).strip()
-            if not text:
-                continue
+            vector = embed_text(entry["text"])
+            metadata = clean_metadata(entry.get("meta", {}))
+            metadata["kind"] = entry.get("kind", "journal")  # always ensure kind is present
 
-            kind = entry.get("kind", "journal")
-            title = str(entry.get("title", ""))
-            tags = entry.get("tags", [])
-            if isinstance(tags, (float, int)):
-                tags = [str(tags)]
-
-            metadata = {
-                "kind": kind,
-                "title": title,
-                "tags": [str(tag) for tag in tags],
-                "mood": str(entry.get("mood", "")),
-                "people": [str(p) for p in entry.get("people", [])],
-                "activities": [str(a) for a in entry.get("activities", [])],
-                "keywords": [str(k) for k in entry.get("keywords", [])],
-                "meta": entry.get("meta", {})
-            }
-
-            # Embed and upsert into Pinecone
-            embedding = embed_text(text)
             index.upsert([
-                (
-                    entry.get("id", str(hash(text))),  # fallback id
-                    embedding,
-                    metadata
-                )
+                {
+                    "id": entry.get("id", entry["meta"].get("datetime_iso", "")),
+                    "values": vector,
+                    "metadata": metadata
+                }
             ])
-
-    print("✅ Journal upload complete.")
+    print("🎉 Upload complete.")
 
 
 if __name__ == "__main__":
-    print(f"📓 Using journal file: {INPUT_FILE}")
     upload_entries()
