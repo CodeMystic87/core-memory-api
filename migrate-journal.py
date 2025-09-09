@@ -1,78 +1,85 @@
 import os
 import json
+import hashlib
+import datetime
 from openai import OpenAI
-from pinecone import Pinecone
+import pinecone
 
-print("🚀 Running migrate_clean_journal.py...")
+print("🚀 migrate_journal.py has started...")
 
 # Initialize OpenAI + Pinecone
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
+pc = pinecone.Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
 index = pc.Index("core-memory")
 
-# Path to your journal file
+# Path to your JSONL journal
 file_path = "journal_with_tags_and_categories.jsonl"
 
-if not os.path.exists(file_path):
-    print(f"❌ File not found: {file_path}")
-    exit(1)
-
-# 🔄 Delete only pre-September journal entries
-print("⚠️ Clearing journal entries before 2025-09-01...")
-index.delete(filter={"date": {"$lt": "2025-09-01"}})
-print("✅ Old journal entries cleared. Live memories are safe.")
-
 # Load entries
-entries = []
 with open(file_path, "r", encoding="utf-8") as f:
-    for line in f:
-        try:
-            entry = json.loads(line)
-            entries.append(entry)
-        except Exception as e:
-            print(f"⚠️ Skipping invalid line: {e}")
+    entries = [json.loads(line) for line in f]
 
-print(f"✅ Loaded {len(entries)} journal entries")
+print(f"📒 Loaded {len(entries)} journal entries.")
 
-# Upload in batches
-batch_size = 100
-uploaded_count = 0
+# Step 1: Delete only journal entries before Sept 1, 2025
+print("🧹 Cleaning old journal entries...")
+to_delete = []
+res = index.query(vector=[0]*1536, top_k=20000, include_metadata=True)
+for match in res["matches"]:
+    meta = match.get("metadata", {})
+    if meta.get("kind") == "journal" and meta.get("date", "9999-12-31") < "2025-09-01":
+        to_delete.append(match["id"])
 
-for i in range(0, len(entries), batch_size):
-    batch = entries[i:i+batch_size]
-    vectors = []
+if to_delete:
+    print(f"🗑️ Deleting {len(to_delete)} old journal entries...")
+    index.delete(ids=to_delete)
+else:
+    print("✅ No old journal entries to delete.")
 
-    for entry in batch:
-        try:
-            text = str(entry.get("text", "")).strip()
-            if not text:
-                continue
+# Step 2: Re-upload journals with correct schema
+print("⬆️ Uploading journal entries...")
 
-            embedding = client.embeddings.create(
-                model="text-embedding-3-small",
-                input=text
-            ).data[0].embedding
+for i, entry in enumerate(entries):
+    text = entry.get("text", "").strip()
+    title = entry.get("title", "Untitled")
+    date_raw = entry.get("date")  # e.g. "2025-08-24"
+    tags = entry.get("tags", [])
+    categories = entry.get("categories", [])
 
-            metadata = {
-                "text": text,
-                "title": entry.get("title", "Untitled"),
-                "date": entry.get("date", "1970-01-01"),  # fallback
-                "tags": entry.get("tags", []),
-                "category": entry.get("category", "journal")
-            }
+    # Parse date
+    try:
+        dt = datetime.datetime.strptime(date_raw, "%Y-%m-%d")
+        date_str = dt.strftime("%Y-%m-%d")
+        date_friendly = dt.strftime("%B %d, %Y")
+    except Exception as e:
+        print(f"⚠️ Skipping invalid date {date_raw}: {e}")
+        continue
 
-            vectors.append({
-                "id": str(entry.get("id", f"entry-{i}")),
-                "values": embedding,
-                "metadata": metadata
-            })
+    # Stable ID: journal-YYYYMMDD-hash
+    uid = hashlib.md5((date_str + text[:50]).encode("utf-8")).hexdigest()[:8]
+    vector_id = f"journal-{date_str}-{uid}"
 
-        except Exception as e:
-            print(f"❌ Skipping entry due to error: {e}")
+    # Embedding
+    emb = client.embeddings.create(
+        model="text-embedding-3-small",
+        input=f"{title}\n{text}"
+    ).data[0].embedding
 
-    if vectors:
-        index.upsert(vectors)
-        uploaded_count += len(vectors)
-        print(f"✅ Uploaded {len(vectors)} entries in batch {i//batch_size+1}")
+    # Metadata
+    metadata = {
+        "kind": "journal",
+        "title": title,
+        "text": text,
+        "date": date_str,             # strict format
+        "date_friendly": date_friendly,  # human format
+        "tags": tags,
+        "categories": categories,
+    }
 
-print(f"\n🎉 Finished migration! Total uploaded: {uploaded_count}/{len(entries)}")
+    # Upsert
+    index.upsert(vectors=[{"id": vector_id, "values": emb, "metadata": metadata}])
+
+    if i % 50 == 0:
+        print(f"✅ Uploaded {i+1}/{len(entries)} entries...")
+
+print("🎉 Migration complete! Journals are re-indexed with correct date fields.")
