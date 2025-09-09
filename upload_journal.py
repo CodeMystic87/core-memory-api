@@ -1,92 +1,53 @@
 import os
+import sys
 import json
 from openai import OpenAI
 import pinecone
-from datetime import datetime
 
 print("🚀 upload_journal.py has started...")
 
-# === Initialize OpenAI ===
+# === Load API keys ===
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-
-# === Initialize Pinecone ===
 pc = pinecone.Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
 index = pc.Index("core-memory")
 
-# === Path to your journal file (already in GitHub repo) ===
-file_path = "journal_with_tags_and_categories.jsonl"
+# === Get input file path ===
+if len(sys.argv) > 1:
+    input_file = sys.argv[1]
+else:
+    input_file = os.path.join("core_memory_api", "journal_with_tags_and_categories.jsonl")
 
-if not os.path.exists(file_path):
-    print(f"❌ File not found: {file_path}")
-    exit(1)
+print(f"📂 Using journal file: {input_file}")
 
-# === Load entries ===
-with open(file_path, "r", encoding="utf-8") as f:
-    entries = [json.loads(line) for line in f]
+if not os.path.exists(input_file):
+    raise FileNotFoundError(f"❌ File not found: {input_file}")
 
-print(f"📖 Loaded {len(entries)} journal entries.")
+# === Upload entries ===
+with open(input_file, "r") as f:
+    for line in f:
+        entry = json.loads(line.strip())
+        text = entry.get("text", "")
+        meta = {
+            "title": entry.get("title", "Untitled"),
+            "date": entry.get("date"),
+            "tags": entry.get("tags", []),
+            "category": entry.get("category", "uncategorized"),
+            "date_friendly": entry.get("date_friendly", entry.get("date")),
+        }
 
-# === Normalize date ===
-def normalize_date(date_str):
-    try:
-        dt = datetime.strptime(date_str, "%Y-%m-%d")
-        return dt.strftime("%Y-%m-%d"), dt.strftime("%B %d, %Y")
-    except Exception:
-        return None, date_str  # fallback if invalid
+        # Create embedding
+        embedding = client.embeddings.create(
+            model="text-embedding-3-small",
+            input=text
+        ).data[0].embedding
 
-# === Upload in batches ===
-batch_size = 50
-uploaded = 0
-batch = []
+        # Upsert into Pinecone
+        index.upsert([
+            {
+                "id": entry.get("id", f"journal-{meta['date']}"),
+                "values": embedding,
+                "metadata": {"text": text, **meta}
+            }
+        ])
 
-for i, entry in enumerate(entries):
-    text = entry.get("text", "").strip()
-    if not text:
-        continue
-
-    title = entry.get("title", f"Journal Entry {i}")
-    tags = entry.get("tags", [])
-    categories = entry.get("categories", [])
-    raw_date = entry.get("date", "")
-
-    date_iso, date_friendly = normalize_date(raw_date)
-
-    # Create embedding
-    embedding = client.embeddings.create(
-        model="text-embedding-3-small",
-        input=f"{title}\n{text}"
-    ).data[0].embedding
-
-    # Build metadata
-    metadata = {
-        "type": "journal",
-        "title": title,
-        "text": text,
-        "tags": tags,
-        "categories": categories,
-        "date": date_iso,
-        "date_friendly": date_friendly,
-    }
-
-    # Use stable ID (date + index)
-    vector_id = f"journal-{date_iso or 'unknown'}-{i}"
-
-    batch.append({
-        "id": vector_id,
-        "values": embedding,
-        "metadata": metadata
-    })
-
-    # Upload every 50
-    if len(batch) >= batch_size:
-        index.upsert(vectors=batch)
-        uploaded += len(batch)
-        print(f"✅ Uploaded {uploaded}/{len(entries)} so far...")
-        batch = []
-
-# Upload remaining
-if batch:
-    index.upsert(vectors=batch)
-    uploaded += len(batch)
-
-print(f"🎉 Finished! Uploaded {uploaded}/{len(entries)} journal entries.")
+print("✅ Journal upload completed successfully!")
