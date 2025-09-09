@@ -22,18 +22,20 @@ def embed_text(text):
 
 
 def clean_metadata(meta):
-    """Ensure Pinecone metadata is valid: only str, number, bool, or list[str]."""
-    if not meta or not isinstance(meta, dict):
-        return {}
-    cleaned = {}
-    for k, v in meta.items():
-        if isinstance(v, (str, int, float, bool)):
-            cleaned[k] = v
-        elif isinstance(v, list) and all(isinstance(x, str) for x in v):
-            cleaned[k] = v
-        else:
-            cleaned[k] = str(v)  # fallback: stringify
-    return cleaned
+    """Recursively replace NaN, Infinity, and -Infinity with None"""
+    import math
+
+    if isinstance(meta, dict):
+        return {k: clean_metadata(v) for k, v in meta.items()}
+    elif isinstance(meta, list):
+        return [clean_metadata(v) for v in meta]
+    elif isinstance(meta, float):
+        if math.isnan(meta) or math.isinf(meta):
+            return None
+        return meta
+    else:
+        return meta
+
 
 
 def upload_entries():
