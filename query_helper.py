@@ -27,12 +27,17 @@ def universal_query(index, date=None, keyword=None, tag=None, semantic=None, top
 
     # Step 4: Decide query type
     if keyword:
-        print(f"\n🔍 Querying by keyword = {keyword}")
+        print(f"\n🔍 Keyword search (semantic style) = {keyword}")
+        client = get_openai_client()
+        embedding = client.embeddings.create(
+            model="text-embedding-3-small",
+            input=keyword
+        ).data[0].embedding
         res = index.query(
-            vector=[0]*1536,
+            vector=embedding,
             top_k=top_k,
             include_metadata=True,
-            filter={"text": {"$contains": keyword}, **pinecone_filter}
+            filter=pinecone_filter if pinecone_filter else None
         )
     elif semantic:
         print(f"\n🤖 Semantic search for '{semantic}'")
