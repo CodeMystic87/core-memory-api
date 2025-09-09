@@ -1,0 +1,25 @@
+import json
+
+INPUT_FILE = "journal_fixed.json"
+OUTPUT_FILE = "journal_fixed.json"  # overwrite same file
+
+def patch_journal_file():
+    with open(INPUT_FILE, "r") as f:
+        entries = json.load(f)
+
+    # Ensure every entry has a meta field
+    for e in entries:
+        if "meta" not in e:
+            e["meta"] = {
+                "datetime_iso": "",
+                "timezone": "",
+                "version": "v3.7a"
+            }
+
+    with open(OUTPUT_FILE, "w") as f:
+        json.dump(entries, f, indent=2)
+
+    print(f"✅ Patched {len(entries)} entries in {OUTPUT_FILE}")
+
+if __name__ == "__main__":
+    patch_journal_file()
