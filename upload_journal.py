@@ -1,60 +1,59 @@
+import os
 import json
-import requests
+from openai import OpenAI
+import pinecone
 
-# === CONFIG ===
-API_URL = "https://core-memory-api.onrender.com/storeMemory"
-INPUT_FILE = "journal_fixed.json"
+# Input file – make sure this matches your migrated journal
+INPUT_FILE = "core_memory_api/journal_fixed.jsonl"
 
-# === FUNCTIONS ===
+# Initialize clients
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+pc = pinecone.Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
+index = pc.Index("core-memory")
 
-def upload_entries(entries):
-    uploaded = []
-    for e in entries:
-        entry = {
-            "text": e.get("text", ""),
-            "kind": e.get("kind", "note"),
-            "title": e.get("title", ""),
-            "tags": e.get("tags", []),
-            "mood": e.get("mood", ""),
-            "people": e.get("people", []),
-            "activities": e.get("activities", []),
-            "keywords": e.get("keywords", []),
-            "meta": {
-                "datetime_iso": e.get("meta", {}).get("datetime_iso", ""),
-                "timezone": e.get("meta", {}).get("timezone", ""),
-                "version": e.get("meta", {}).get("version", "v3.7a")
-            }
-        }
-        uploaded.append(entry)
-    return uploaded
+def embed_text(text):
+    """Generate embeddings safely from OpenAI."""
+    response = client.embeddings.create(
+        input=text,
+        model="text-embedding-3-small"
+    )
+    return response.data[0].embedding
 
-def main():
-    # Load entries
-    with open(INPUT_FILE, "r") as f:
-        entries = json.load(f)
+def clean_metadata(meta):
+    """Recursively clean metadata to remove NaN/Infinity/-Infinity."""
+    if isinstance(meta, dict):
+        return {k: clean_metadata(v) for k, v in meta.items()}
+    elif isinstance(meta, list):
+        return [clean_metadata(v) for v in meta]
+    elif isinstance(meta, float):
+        if meta != meta or meta in (float("inf"), float("-inf")):
+            return None
+        return meta
+    return meta
 
-    # Ensure all entries have a meta field
-    for e in entries:
-        if "meta" not in e:
-            e["meta"] = {
-                "datetime_iso": "",
-                "timezone": "",
-                "version": "v3.7a"
-            }
+def upload_entries():
+    print(f"📖 Using journal file: {INPUT_FILE}")
+    with open(INPUT_FILE, "r", encoding="utf-8") as infile:
+        for line in infile:
+            if not line.strip():
+                continue
 
-    # Prepare upload payload
-    payload = upload_entries(entries)
+            entry = json.loads(line)
 
-    # Upload to API
-    for entry in payload:
-        try:
-            response = requests.post(API_URL, json=entry)
-            if response.status_code == 200:
-                print(f"✅ Uploaded: {entry.get('title','(no title)')}")
-            else:
-                print(f"❌ Failed: {entry.get('title','(no title)')} | {response.text}")
-        except Exception as ex:
-            print(f"⚠️ Error uploading entry: {entry.get('title','(no title)')} | {ex}")
+            vector = embed_text(entry.get("text", ""))
+
+            # Always ensure metadata is safe
+            meta = entry.get("meta", {})
+            metadata = clean_metadata(meta)
+            metadata["kind"] = entry.get("kind", "journal")
+
+            index.upsert([{
+                "id": entry.get("id", meta.get("datetime_iso", "")),
+                "values": vector,
+                "metadata": metadata
+            }])
+
+    print("✅ Upload complete.")
 
 if __name__ == "__main__":
-    main()
+    upload_entries()
