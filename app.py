@@ -68,26 +68,35 @@ def store_memory(req: MemoryRequest):
 
 @app.post("/searchMemories")
 def search_memories(req: SearchRequest):
-    query_vec = None
-    if req.query:
-        query_vec = openai_client.embeddings.create(
-            input=req.query,
+    query_text = req.query or ""   # fallback if query is None
+    topk = req.topk or 10
+
+    # If no query provided, just return the most recent entries
+    if not query_text.strip():
+        # fetch latest N entries directly from Pinecone
+        res = index.query(
+            vector=[0.0] * 1536,   # dummy vector
+            top_k=topk,
+            include_metadata=True
+        )
+        return {"results": res["matches"]}
+
+    # Otherwise, run the normal embedding search
+    try:
+        embedding = openai_client.embeddings.create(
+            input=query_text,
             model="text-embedding-3-small"
         ).data[0].embedding
-    else:
-        return {"error": "No query provided"}
 
-    res = index.query(vector=query_vec, top_k=req.topk, include_metadata=True)
+        res = index.query(
+            vector=embedding,
+            top_k=topk,
+            include_metadata=True
+        )
+        return {"results": res["matches"]}
+    except Exception as e:
+        return {"error": str(e)}
 
-    results = []
-    for match in res.matches:
-        results.append({
-            "id": match.id,
-            "score": match.score,
-            "metadata": match.metadata
-        })
-
-    return {"results": results}
 
 
 @app.post("/updateMemory")
