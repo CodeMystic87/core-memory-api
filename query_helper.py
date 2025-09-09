@@ -1,6 +1,8 @@
+import os
 from openai import OpenAI
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
 
 def universal_query(index, date=None, keyword=None, tag=None, semantic=None, top_k=3):
     # Step 1: Index stats
