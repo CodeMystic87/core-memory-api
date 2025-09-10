@@ -8,85 +8,98 @@ from datetime import datetime
 # =========================
 CORE_MEMORY_API = "https://core-memory-api.onrender.com/storeMemory"
 TIMEZONE = "America/Phoenix"
-VERSION = "v1"
-
-# =========================
-# LOAD JOURNAL JSONL
-# =========================
+VERSION = "v3.7a"
 INPUT_FILE = "journal_with_tags_and_categories.jsonl"
+LOG_FILE = "migration_log.txt"
 
+# =========================
+# LOAD ENTRIES
+# =========================
 with open(INPUT_FILE, "r", encoding="utf-8") as f:
     entries = [json.loads(line) for line in f]
 
 print(f"Loaded {len(entries)} entries from {INPUT_FILE}")
 
+
 # =========================
-# HELPER: format entry → CoreMemory schema
+# FORMAT ENTRY
 # =========================
 def format_entry(entry):
     try:
-        date_str = entry.get("date")[:10]  # YYYY-MM-DD
-        date_obj = datetime.fromisoformat(date_str)
+        # --- Date handling ---
+        date_raw = entry.get("date", "")
+        if not date_raw:
+            return None
+        try:
+            dt = datetime.fromisoformat(date_raw.replace("Z", "+00:00"))
+        except Exception:
+            return None
+        date_str = dt.date().isoformat()
 
+        # --- Tags (baseline schema) ---
         tags = [
             f"date:{date_str}",
-            f"date_friendly:{date_obj.strftime('%B %-d, %Y')}",
+            f"date_friendly:{dt.strftime('%B %d, %Y')}",
             "type:journal",
         ]
-
         if "category" in entry and entry["category"]:
             tags.append(f"category:{entry['category']}")
         if "tags" in entry and entry["tags"]:
             tags.extend(entry["tags"])
 
-        # Always coerce text to string
+        # --- Text ---
         text = str(entry.get("text", "")).strip()
-
-        # Skip empty or very short entries
-        if not text or len(text) < 20:
-            print(f"⏩ Skipped {tags[0]} — too short or empty")
+        if not text or len(text) < 20:  # skip junk
             return None
 
+        # --- Final payload in CoreMemory schema ---
         return {
             "text": text,
             "kind": "journal",
             "tags": tags,
             "meta": {
-                "datetime_iso": entry.get("date"),
+                "datetime_iso": dt.isoformat(),
                 "timezone": TIMEZONE,
                 "version": VERSION,
-            }
+            },
         }
     except Exception as e:
-        print(f"⚠️ Skipped entry due to formatting error: {e}")
+        print(f"⚠️ Skipped due to formatting error: {e}")
         return None
 
+
 # =========================
-# UPLOAD (batch, safe)
+# UPLOAD ENTRY WITH RETRIES
 # =========================
-def upload_entries(batch):
-    for e in batch:
-        payload = format_entry(e)
-        if not payload:
-            continue
+def upload_entry(payload, retries=3):
+    for attempt in range(1, retries + 1):
         try:
-            res = requests.post(CORE_MEMORY_API, json=payload)
+            res = requests.post(CORE_MEMORY_API, json=payload, timeout=10)
             if res.status_code == 200:
-                print(f"✅ Saved {payload['tags'][0]} — {payload['text'][:40]}...")
+                return True
             else:
-                print(f"❌ Error {res.status_code}: {res.text}")
-        except Exception as ex:
-            print(f"⚠️ Failed to upload: {ex}")
+                print(f"❌ Failed {res.status_code}: {res.text}")
+        except Exception as e:
+            print(f"⚠️ Error attempt {attempt}: {e}")
+        time.sleep(2 * attempt)  # backoff
+    return False
+
 
 # =========================
-# RUN IN BATCHES
+# MIGRATION LOOP
 # =========================
-BATCH_SIZE = 10   # start small; once stable, increase (e.g., 100)
+with open(LOG_FILE, "w", encoding="utf-8") as log:
+    for i, entry in enumerate(entries, 1):
+        payload = format_entry(entry)
+        if not payload:
+            log.write(f"[SKIPPED] {i} — invalid or too short\n")
+            continue
 
-for i in range(0, len(entries), BATCH_SIZE):
-    batch = entries[i:i+BATCH_SIZE]
-    print(f"\nUploading entries {i+1} → {i+len(batch)}...")
-    upload_entries(batch)
-    time.sleep(0.5)  # safety delay between batches
+        success = upload_entry(payload)
+        if success:
+            log.write(f"[SAVED]   {i} — {payload['tags'][0]}\n")
+            print(f"✅ Saved {payload['tags'][0]} — {payload['text'][:40]}...")
+        else:
+            log.write(f"[FAILED]  {i} — {payload['tags'][0]}\n")
 
-print("🎉 Migration complete")
+print("🎉 Migration finished. Check migration_log.txt for details.")
