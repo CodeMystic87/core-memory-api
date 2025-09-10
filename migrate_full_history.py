@@ -1,110 +1,88 @@
 import json
 import requests
-import time
 from datetime import datetime
 
-# =========================
-# CONFIG
-# =========================
+# ===== CONFIG =====
 CORE_MEMORY_API = "https://core-memory-api.onrender.com/storeMemory"
+INPUT_FILE = "Journal_with_tags_and_categories.json"
+VERSION = "3.7a"
 TIMEZONE = "America/Phoenix"
-VERSION = "v3.7a"
-INPUT_FILE = "journal_with_tags_and_categories.jsonl"
-LOG_FILE = "migration_log.txt"
 
-# =========================
-# LOAD ENTRIES
-# =========================
+# ===== LOAD INPUT =====
 with open(INPUT_FILE, "r", encoding="utf-8") as f:
     entries = [json.loads(line) for line in f]
 
 print(f"Loaded {len(entries)} entries from {INPUT_FILE}")
 
-
-# =========================
-# FORMAT ENTRY
-# =========================
-def format_entry(entry):
+# ===== HELPERS =====
+def normalize_date(raw_date: str):
+    """
+    Convert input date string into ISO + friendly formats.
+    Expects YYYY-MM-DD already, but fallback if missing.
+    """
     try:
-        # --- Date handling ---
-        date_raw = entry.get("date", "")
-        if not date_raw:
-            return None
-        try:
-            dt = datetime.fromisoformat(date_raw.replace("Z", "+00:00"))
-        except Exception:
-            return None
-        date_str = dt.date().isoformat()
+        dt = datetime.strptime(raw_date, "%Y-%m-%d")
+    except Exception:
+        # fallback default if no valid date
+        return "2000-01-01", "January 1, 2000"
 
-        # --- Tags (baseline schema) ---
-        tags = [
-            f"date:{date_str}",
-            f"date_friendly:{dt.strftime('%B %d, %Y')}",
-            "type:journal",
-        ]
-        if "category" in entry and entry["category"]:
-            tags.append(f"category:{entry['category']}")
-        if "tags" in entry and entry["tags"]:
-            tags.extend(entry["tags"])
+    iso = dt.strftime("%Y-%m-%d")
+    friendly = dt.strftime("%B %-d, %Y")  # e.g., November 12, 2019
+    return iso, friendly
 
-        # --- Text ---
-        text = str(entry.get("text", "")).strip()
-        if not text or len(text) < 20:  # skip junk
-            return None
+def build_payload(entry):
+    """
+    Force every entry to include:
+      - kind
+      - tags: date + friendly + type
+      - meta
+    """
+    raw_date = entry.get("date") or entry.get("tags", [""])[0].replace("date:", "")
+    date_iso, date_friendly = normalize_date(raw_date)
 
-        # --- Final payload in CoreMemory schema ---
-        return {
-            "text": text,
-            "kind": "journal",
-            "tags": tags,
-            "meta": {
-                "datetime_iso": dt.isoformat(),
-                "timezone": TIMEZONE,
-                "version": VERSION,
-            },
+    payload = {
+        "text": entry.get("text", "").strip(),
+        "kind": "journal",  # force journal
+        "tags": [
+            f"date:{date_iso}",
+            f"date_friendly:{date_friendly}",
+            "type:journal"
+        ],
+        "meta": {
+            "datetime_iso": f"{date_iso}T00:00:00",
+            "timezone": TIMEZONE,
+            "version": VERSION
         }
-    except Exception as e:
-        print(f"⚠️ Skipped due to formatting error: {e}")
-        return None
+    }
 
+    return payload
 
-# =========================
-# UPLOAD ENTRY WITH LOGGING
-# =========================
-def upload_entry(payload, retries=3):
-    for attempt in range(1, retries + 1):
-        try:
-            res = requests.post(CORE_MEMORY_API, json=payload, timeout=10)
-            try:
-                res_json = res.json()
-            except Exception:
-                res_json = res.text
-
-            if res.status_code == 200:
-                print(f"✅ SUCCESS [{payload['tags'][0]}] {res_json}")
-                return True
-            else:
-                print(f"❌ FAIL [{payload['tags'][0]}] {res.status_code} {res_json}")
-        except Exception as e:
-            print(f"⚠️ Error attempt {attempt}: {e}")
-        time.sleep(2 * attempt)  # backoff
-    return False
-
-
-# =========================
-# MIGRATION LOOP
-# =========================
-with open(LOG_FILE, "w", encoding="utf-8") as log:
-    for i, entry in enumerate(entries, 1):
-        payload = format_entry(entry)
-        if not payload:
-            log.write(f"[SKIPPED] {i} — invalid or too short\n")
-            continue
-
-        success = upload_entry(payload)
-        if success:
-            log.write(f"[SAVED]   {i} — {payload['tags'][0]}\n")
+def upload_entry(payload):
+    try:
+        res = requests.post(CORE_MEMORY_API, json=payload, timeout=10)
+        if res.status_code == 200:
+            return True
         else:
-            log.write(f"[FAILED]  {i} — {payload['tags'][0]}\n")
+            print(f"⚠️ Failed: {res.status_code}, {res.text}")
+            return False
+    except Exception as e:
+        print(f"⚠️ Exception while uploading: {e}")
+        return False
 
-print("🎉 Migration finished. Check migration_log.txt for details.")
+# ===== MAIN LOOP =====
+success, skipped = 0, 0
+
+for i, entry in enumerate(entries, start=1):
+    payload = build_payload(entry)
+
+    # Skip empty/short text
+    if not payload["text"] or len(payload["text"]) < 15:
+        skipped += 1
+        print(f"⏭️ Skipped {i} — too short/empty")
+        continue
+
+    if upload_entry(payload):
+        success += 1
+        print(f"✅ Saved {i}/{len(entries)} — {payload['tags'][0]}: {payload['text'][:40]}...")
+
+print(f"\nDone. Uploaded {success}, skipped {skipped}.")
