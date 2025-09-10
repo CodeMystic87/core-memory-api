@@ -6,124 +6,99 @@ import os
 
 # ===== CONFIG =====
 CORE_MEMORY_API = "https://core-memory-api.onrender.com/storeMemory"
-INPUT_FILE = "core-memory-api/journal_with_tags_and_categories.jsonl"
+INPUT_FILE = "journal_with_tags_and_categories.jsonl"
 TIMEZONE = "America/Phoenix"
-VERSION = "3.7a"
-
-# ===== LOGGING =====
-exceptions_log = open("exceptions.log", "w", encoding="utf-8")
-
-def log_exception(entry, reason):
-    json.dump({"error": reason, "entry": entry}, exceptions_log, ensure_ascii=False)
-    exceptions_log.write("\n")
+VERSION = "3.7b"
 
 # ===== HELPERS =====
-def normalize_date(raw_date: str) -> str:
+def normalize_date(raw_date: str):
+    """Convert input date string into ISO format + friendly format."""
     try:
         dt = datetime.strptime(raw_date, "%Y-%m-%d")
-        return dt.strftime("%Y-%m-%d")
     except Exception:
-        return "1970-01-01"  # fallback if missing/invalid
+        dt = datetime.now(pytz.timezone(TIMEZONE))  # fallback to now
+    return dt.isoformat(), dt.strftime("%B %d, %Y")
 
-def make_friendly_date(date_str: str) -> str:
-    try:
-        dt = datetime.strptime(date_str, "%Y-%m-%d")
-        return dt.strftime("%B %-d, %Y")  # e.g. September 10, 2025
-    except Exception:
-        return "January 1, 1970"
+def build_payload(entry):
+    """Builds the CoreMemory payload with schema v3.7b."""
+    text = entry.get("text", "").strip()
+    if not text:
+        return None  # skip empty
 
-def ensure_entry(entry):
-    """Self-heal entry structure if missing fields."""
-    healed = {}
-
-    # 1. Text
-    text = entry.get("text")
-    if not text or len(text.strip()) == 0:
-        raise ValueError("Missing text")
-
-    healed["text"] = text.strip()
-
-    # 2. Kind
     kind = entry.get("kind", "note")
-    if kind not in ["journal", "note", "task", "idea", "milestone",
-                    "conversation", "decision", "goal", "reference"]:
-        kind = "note"
-    healed["kind"] = kind
-
-    # 3. Meta
-    meta = entry.get("meta", {})
-    dt_iso = meta.get("datetime_iso")
-    if not dt_iso:
-        dt_iso = datetime.now(pytz.UTC).isoformat()
-    timezone = meta.get("timezone", TIMEZONE)
-    version = meta.get("version", VERSION)
-
-    healed["meta"] = {
-        "datetime_iso": dt_iso,
-        "timezone": timezone,
-        "version": version,
-    }
-
-    # 4. Tags
     tags = entry.get("tags", [])
-    date_tag = None
-    for t in tags:
-        if t.startswith("date:"):
-            date_tag = t.split(":", 1)[1]
 
-    if not date_tag:
-        # fallback to normalized date from meta if possible
-        try:
-            date_str = dt_iso.split("T")[0]
-        except Exception:
-            date_str = "1970-01-01"
-        date_tag = normalize_date(date_str)
+    # Normalize dates
+    raw_date = entry.get("date", None)
+    if raw_date:
+        iso_date, friendly_date = normalize_date(raw_date)
+        tags.append(f"date:{raw_date}")
+        tags.append(f"date_friendly:{friendly_date}")
+    else:
+        iso_date, friendly_date = normalize_date(datetime.now().strftime("%Y-%m-%d"))
 
-    friendly = make_friendly_date(date_tag)
-    base_tags = [
-        f"date:{date_tag}",
-        f"date_friendly:{friendly}",
-        f"type:{kind}"
-    ]
-    healed["tags"] = list(set(tags + base_tags))
+    tags.append(f"type:{kind}")
 
-    # 5. Optional extras
-    for field in ["mood", "people", "activities", "keywords"]:
-        if field in entry:
-            healed[field] = entry[field]
+    payload = {
+        "text": text,
+        "kind": kind,
+        "tags": list(set(tags)),  # deduplicate
+        "mood": entry.get("mood"),
+        "people": entry.get("people", []),
+        "activities": entry.get("activities", []),
+        "keywords": entry.get("keywords", []),
+        "meta": {
+            "datetime_iso": iso_date,
+            "timezone": TIMEZONE,
+            "version": VERSION
+        }
+    }
+    return payload
 
-    return healed
+# ===== MAIN MIGRATION =====
+exceptions = []
+total = 0
+success = 0
 
+if not os.path.exists(INPUT_FILE):
+    raise FileNotFoundError(f"❌ Input file not found: {INPUT_FILE}")
 
-# ===== MIGRATION =====
 with open(INPUT_FILE, "r", encoding="utf-8") as f:
     entries = [json.loads(line) for line in f]
 
-print(f"Loaded {len(entries)} entries from {INPUT_FILE}")
-
-success_count = 0
-skip_count = 0
+print(f"📥 Loaded {len(entries)} entries from {INPUT_FILE}")
 
 for idx, entry in enumerate(entries, 1):
+    total += 1
+    payload = build_payload(entry)
+
+    if not payload:
+        exceptions.append({"entry": entry, "error": "Empty or invalid text"})
+        print(f"⚠️ Skipped entry {idx}/{len(entries)} (empty text)")
+        continue
+
     try:
-        healed_entry = ensure_entry(entry)
-
-        res = requests.post(CORE_MEMORY_API, json=healed_entry)
+        res = requests.post(CORE_MEMORY_API, json=payload)
         if res.status_code == 200:
-            success_count += 1
-            if success_count % 100 == 0:
-                print(f"✅ Migrated {success_count}/{len(entries)} so far…")
+            success += 1
+            print(f"✅ Migrated {idx}/{len(entries)} ({success} successful)")
         else:
-            log_exception(entry, f"API error {res.status_code}")
-            skip_count += 1
-
+            exceptions.append({"entry": entry, "error": f"API {res.status_code}"})
+            print(f"❌ Failed {idx}/{len(entries)} - API error {res.status_code}")
     except Exception as e:
-        log_exception(entry, str(e))
-        skip_count += 1
+        exceptions.append({"entry": entry, "error": str(e)})
+        print(f"❌ Exception on entry {idx}/{len(entries)}: {str(e)}")
 
-exceptions_log.close()
+# ===== SUMMARY =====
+print("\n========================")
+print(f"🎉 Migration complete")
+print(f"✅ Successful: {success}")
+print(f"⚠️ Failed: {len(exceptions)}")
+print("========================")
 
-print(f"\nMigration finished!")
-print(f"✅ Successful: {success_count}")
-print(f"⚠️ Skipped: {skip_count}")
-print("Check exceptions.log for details on skipped entries.") 
+if exceptions:
+    with open("exceptions.log", "w", encoding="utf-8") as log:
+        json.dump(exceptions, log, indent=2, ensure_ascii=False)
+    print("⚠️ Some entries failed — logged to exceptions.log")
+else:
+    print("🎉 All entries migrated successfully — no errors!")
