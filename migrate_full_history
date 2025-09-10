@@ -1,0 +1,79 @@
+import json
+import requests
+from datetime import datetime
+
+# =========================
+# CONFIG
+# =========================
+CORE_MEMORY_API = "https://core-memory-api.onrender.com/storeMemory"
+API_KEY = "YOUR_API_KEY_HERE"  # if your endpoint uses auth
+TIMEZONE = "America/Phoenix"
+VERSION = "v1"
+
+# =========================
+# LOAD JOURNAL JSONL
+# =========================
+INPUT_FILE = "journal_with_tags_and_categories.jsonl"
+
+with open(INPUT_FILE, "r", encoding="utf-8") as f:
+    entries = [json.loads(line) for line in f]
+
+print(f"Loaded {len(entries)} entries from {INPUT_FILE}")
+
+# =========================
+# HELPER: format entry → CoreMemory schema
+# =========================
+def format_entry(entry):
+    date_str = entry.get("date")[:10]  # YYYY-MM-DD
+    date_obj = datetime.fromisoformat(date_str)
+
+    tags = [
+        f"date:{date_str}",
+        f"date_friendly:{date_obj.strftime('%B %-d, %Y')}",
+        "type:journal",
+    ]
+
+    # add category + original tags if present
+    if "category" in entry and entry["category"]:
+        tags.append(f"category:{entry['category']}")
+    if "tags" in entry and entry["tags"]:
+        tags.extend(entry["tags"])
+
+    return {
+        "text": entry.get("text", "").strip(),
+        "kind": "journal",
+        "tags": tags,
+        "meta": {
+            "datetime_iso": entry.get("date"),
+            "timezone": TIMEZONE,
+            "version": VERSION,
+        }
+    }
+
+# =========================
+# UPLOAD (batch, safe)
+# =========================
+def upload_entries(batch):
+    for e in batch:
+        payload = format_entry(e)
+        if not payload["text"]:
+            continue  # skip empty
+        try:
+            res = requests.post(CORE_MEMORY_API, json=payload)
+            if res.status_code == 200:
+                print(f"✅ Saved {payload['tags'][0]} — {payload['text'][:40]}...")
+            else:
+                print(f"❌ Error {res.status_code}: {res.text}")
+        except Exception as ex:
+            print(f"⚠️ Failed: {ex}")
+
+# =========================
+# RUN IN BATCHES
+# =========================
+BATCH_SIZE = 10   # test small first
+for i in range(0, len(entries), BATCH_SIZE):
+    batch = entries[i:i+BATCH_SIZE]
+    print(f"\nUploading entries {i+1} → {i+len(batch)}...")
+    upload_entries(batch)
+
+print("🎉 Migration complete")
