@@ -1,196 +1,108 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import List, Optional
-import os
-from openai import OpenAI
-from pinecone import Pinecone
 from datetime import datetime
+import pytz
+import uuid
 
-# Initialize FastAPI
 app = FastAPI()
 
-# Initialize OpenAI
-openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+# ----------------------------
+# Fallback cache (in-memory)
+# ----------------------------
+fallback_cache = {}
 
-# Initialize Pinecone
-pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
-index = pc.Index(os.getenv("PINECONE_INDEX_NAME", "core-memory"))
-
-# Local fallback cache
-LOCAL_FALLBACK = {"last_saved": None}
-
+# ----------------------------
 # Request Models
+# ----------------------------
+class MetaData(BaseModel):
+    datetime_iso: str
+    timezone: str
+    version: str
+
 class MemoryRequest(BaseModel):
     id: Optional[str] = None
     text: str
-    kind: str = "note"
     tags: Optional[List[str]] = []
+    kind: str  # journal, note, task, idea, milestone
+    mood: Optional[str] = None
     people: Optional[List[str]] = []
     activities: Optional[List[str]] = []
     keywords: Optional[List[str]] = []
-    mood: Optional[str] = None
-    meta: Optional[dict] = {}
+    meta: MetaData
+
+class SearchRequest(BaseModel):
+    query: Optional[str] = None
+    date: Optional[str] = None
+    date_from: Optional[str] = None
+    date_to: Optional[str] = None
+    kinds: Optional[List[str]] = []
+    tags_contains: Optional[List[str]] = []
+    tags_contains_any: Optional[List[str]] = []
+    tags_contains_all: Optional[List[str]] = []
+    people_contains_any: Optional[List[str]] = []
+    mood_contains_any: Optional[List[str]] = []
+    activities_contains_any: Optional[List[str]] = []
+    include_text: Optional[bool] = False
+    sort_by: Optional[str] = "relevance"  # relevance, newest, oldest
+    summarize: Optional[bool] = False
 
 class UpdateRequest(BaseModel):
     id: str
     text: Optional[str] = None
-    kind: Optional[str] = None
-    tags: Optional[List[str]] = None
-    people: Optional[List[str]] = None
-    activities: Optional[List[str]] = None
-    keywords: Optional[List[str]] = None
+    tags: Optional[List[str]] = []
     mood: Optional[str] = None
-    meta: Optional[dict] = None
+    people: Optional[List[str]] = []
+    activities: Optional[List[str]] = []
+    keywords: Optional[List[str]] = []
 
 class DeleteRequest(BaseModel):
     id: str
 
-class SearchRequest(BaseModel):
-    query: Optional[str] = None
-    date_from: Optional[str] = None
-    date_to: Optional[str] = None
-    kinds: Optional[List[str]] = None
-    tags_contains: Optional[List[str]] = None
-    people_contains: Optional[List[str]] = None
-    activities_contains: Optional[List[str]] = None
-    mood_contains: Optional[List[str]] = None
-    include_text: bool = True
-    sort_by: Optional[str] = None
-    summarize: bool = False
+class VocabularyRequest(BaseModel):
+    words: List[str]
 
-# --- Helpers ---
-def embed_text(text: str):
-    response = openai_client.embeddings.create(
-        model="text-embedding-3-small",
-        input=text
-    )
-    return response.data[0].embedding
+# ----------------------------
+# Endpoints
+# ----------------------------
 
-# --- Endpoints ---
 @app.post("/storeMemory")
 def store_memory(req: MemoryRequest):
-    try:
-        entry_id = req.id or f"mem-{datetime.utcnow().isoformat()}"
-        vector = embed_text(req.text)
-
-        meta = req.meta or {}
-        meta.update({
-            "datetime_iso": datetime.utcnow().isoformat(),
-            "version": "v3.7a"
-        })
-
-        index.upsert([{
-            "id": entry_id,
-            "values": vector,
-            "metadata": {
-                "text": req.text,
-                "kind": req.kind,
-                "tags": req.tags,
-                "people": req.people,
-                "activities": req.activities,
-                "keywords": req.keywords,
-                "mood": req.mood,
-                "meta": meta
-            }
-        }])
-
-        LOCAL_FALLBACK["last_saved"] = {
-            "id": entry_id,
-            "text": req.text,
-            "kind": req.kind,
-            "tags": req.tags,
-            "meta": meta
-        }
-
-        return {
-            "id": entry_id,
-            "status": "saved",
-            "text": req.text,
-            "kind": req.kind,
-            "tags": req.tags,
-            "meta": meta
-        }
-    except Exception as e:
-        return {"id": "local-fallback", "status": f"saved locally (error: {str(e)})", "text": req.text}
-
-@app.post("/updateMemory")
-def update_memory(req: UpdateRequest):
-    try:
-        if req.id == "local-fallback" and LOCAL_FALLBACK["last_saved"]:
-            # Fallback: delete old + re-save as new
-            old = LOCAL_FALLBACK["last_saved"]
-            new_text = req.text or old["text"]
-            return store_memory(MemoryRequest(
-                id=None,
-                text=new_text,
-                kind=req.kind or old["kind"],
-                tags=req.tags or old["tags"],
-                meta=req.meta or old["meta"]
-            ))
-
-        # Otherwise, update directly in Pinecone
-        existing = index.fetch([req.id])
-        if not existing.vectors:
-            return {"status": "not found", "id": req.id}
-
-        meta = existing.vectors[req.id].metadata
-        if req.text:
-            vector = embed_text(req.text)
-        else:
-            vector = existing.vectors[req.id].values
-
-        index.upsert([{
-            "id": req.id,
-            "values": vector,
-            "metadata": {
-                **meta,
-                "text": req.text or meta.get("text", ""),
-                "kind": req.kind or meta.get("kind", "note"),
-                "tags": req.tags or meta.get("tags", [])
-            }
-        }])
-
-        return {"id": req.id, "status": "updated"}
-    except Exception as e:
-        return {"id": req.id, "status": f"update failed: {str(e)}"}
-
-@app.post("/deleteMemory")
-def delete_memory(req: DeleteRequest):
-    try:
-        if req.id == "local-fallback" and LOCAL_FALLBACK["last_saved"]:
-            LOCAL_FALLBACK["last_saved"]["deleted"] = True
-            return {"id": req.id, "status": "deleted (fallback)"}
-
-        index.delete(ids=[req.id])
-        return {"id": req.id, "status": "deleted"}
-    except Exception as e:
-        return {"id": req.id, "status": f"delete failed: {str(e)}"}
+    memory_id = req.id or str(uuid.uuid4())
+    fallback_cache[memory_id] = req.dict()
+    return {"status": "stored", "id": memory_id, "memory": req.dict()}
 
 @app.post("/searchMemories")
 def search_memories(req: SearchRequest):
-    try:
-        if not req.query:
-            return {"results": [], "status": "empty query"}
+    results = []
+    for mem_id, mem in fallback_cache.items():
+        if req.query and req.query.lower() not in mem["text"].lower():
+            continue
+        results.append(mem)
+    return {"results": results}
 
-        vector = embed_text(req.query)
-        res = index.query(vector=vector, top_k=5, include_metadata=True)
+@app.post("/updateMemory")
+def update_memory(req: UpdateRequest):
+    if req.id not in fallback_cache:
+        raise HTTPException(status_code=404, detail="Memory not found")
+    fallback_cache[req.id].update({k: v for k, v in req.dict().items() if v is not None})
+    return {"status": "updated", "id": req.id, "memory": fallback_cache[req.id]}
 
-        return {
-            "results": [
-                {"id": match.id, "score": match.score, "metadata": match.metadata}
-                for match in res.matches
-            ],
-            "status": "ok"
-        }
-    except Exception as e:
-        return {"status": f"search failed: {str(e)}"}
+@app.post("/deleteMemory")
+def delete_memory(req: DeleteRequest):
+    if req.id not in fallback_cache:
+        raise HTTPException(status_code=404, detail="Memory not found")
+    deleted = fallback_cache.pop(req.id)
+    return {"status": "deleted", "id": req.id, "memory": deleted}
 
-@app.get("/lastSaved")
-def last_saved():
-    if LOCAL_FALLBACK["last_saved"]:
-        return {"last_saved": LOCAL_FALLBACK["last_saved"], "status": "ok"}
-    return {"status": "no local fallback found"}
+@app.post("/storeVocabulary")
+def store_vocabulary(req: VocabularyRequest):
+    return {"status": "stored", "words": req.words}
 
 @app.get("/health")
 def health_check():
-    return {"status": "ok"}
+    return {"status": "ok", "time": datetime.now().isoformat()}
+
+@app.get("/testNoConfirm")
+def test_no_confirm():
+    return {"message": "Test endpoint response"}
