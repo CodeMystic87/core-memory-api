@@ -1,15 +1,24 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
 from typing import List, Optional
-from datetime import datetime
-import pytz
+import fastapi
+import pydantic
+import uvicorn
+import openai
+import httpx
 import json
 import os
 import uuid
 
+try:
+    import pinecone
+    pinecone_version = pinecone.__version__
+except ImportError:
+    pinecone_version = "not installed"
+
 app = FastAPI(title="CoreMemory API", version="1.0.0")
 
-# --- Local Fallback Cache (saved in JSON so it survives restarts) ---
+# --- Local Fallback Cache (JSON so it survives restarts) ---
 CACHE_FILE = "memory_cache.json"
 
 if os.path.exists(CACHE_FILE):
@@ -157,3 +166,16 @@ def health_check():
 @app.get("/testNoConfirm")
 def test_no_confirm():
     return {"message": "Test endpoint is working"}
+
+
+# --- Version Debug Endpoint ---
+@app.get("/version")
+def version_check():
+    return {
+        "fastapi": fastapi.__version__,
+        "pydantic": pydantic.__version__,
+        "uvicorn": uvicorn.__version__,
+        "openai": getattr(openai, "__version__", "unknown"),
+        "httpx": httpx.__version__,
+        "pinecone-client": pinecone_version
+    }
