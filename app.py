@@ -4,8 +4,8 @@ app = FastAPI()
 
 @app.get("/health")
 def health_check():
-    return {"status": "ok"}
+    return {"status": "healthy"}
 
 @app.get("/version")
-def version():
-    return {"version": "test-boot"}
+def version_check():
+    return {"version": "test-1.0.0"}
