@@ -6,7 +6,6 @@ from datetime import datetime
 # CONFIG
 # =========================
 CORE_MEMORY_API = "https://core-memory-api.onrender.com/storeMemory"
-API_KEY = "YOUR_API_KEY_HERE"  # if your endpoint uses auth
 TIMEZONE = "America/Phoenix"
 VERSION = "v1"
 
@@ -33,7 +32,6 @@ def format_entry(entry):
         "type:journal",
     ]
 
-    # add category + original tags if present
     if "category" in entry and entry["category"]:
         tags.append(f"category:{entry['category']}")
     if "tags" in entry and entry["tags"]:
@@ -57,7 +55,7 @@ def upload_entries(batch):
     for e in batch:
         payload = format_entry(e)
         if not payload["text"]:
-            continue  # skip empty
+            continue
         try:
             res = requests.post(CORE_MEMORY_API, json=payload)
             if res.status_code == 200:
@@ -70,7 +68,7 @@ def upload_entries(batch):
 # =========================
 # RUN IN BATCHES
 # =========================
-BATCH_SIZE = 10   # test small first
+BATCH_SIZE = 10   # start small, verify, then increase
 for i in range(0, len(entries), BATCH_SIZE):
     batch = entries[i:i+BATCH_SIZE]
     print(f"\nUploading entries {i+1} → {i+len(batch)}...")
