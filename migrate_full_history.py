@@ -4,7 +4,7 @@ from datetime import datetime
 
 # ===== CONFIG =====
 CORE_MEMORY_API = "https://core-memory-api.onrender.com/storeMemory"
-INPUT_FILE = "Journal_with_tags_and_categories.json"
+INPUT_FILE = "core-memory-api/Journal_with_tags_and_categories.json"
 VERSION = "3.7a"
 TIMEZONE = "America/Phoenix"
 
