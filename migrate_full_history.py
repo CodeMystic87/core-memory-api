@@ -69,16 +69,22 @@ def format_entry(entry):
 
 
 # =========================
-# UPLOAD ENTRY WITH RETRIES
+# UPLOAD ENTRY WITH LOGGING
 # =========================
 def upload_entry(payload, retries=3):
     for attempt in range(1, retries + 1):
         try:
             res = requests.post(CORE_MEMORY_API, json=payload, timeout=10)
+            try:
+                res_json = res.json()
+            except Exception:
+                res_json = res.text
+
             if res.status_code == 200:
+                print(f"✅ SUCCESS [{payload['tags'][0]}] {res_json}")
                 return True
             else:
-                print(f"❌ Failed {res.status_code}: {res.text}")
+                print(f"❌ FAIL [{payload['tags'][0]}] {res.status_code} {res_json}")
         except Exception as e:
             print(f"⚠️ Error attempt {attempt}: {e}")
         time.sleep(2 * attempt)  # backoff
@@ -98,7 +104,6 @@ with open(LOG_FILE, "w", encoding="utf-8") as log:
         success = upload_entry(payload)
         if success:
             log.write(f"[SAVED]   {i} — {payload['tags'][0]}\n")
-            print(f"✅ Saved {payload['tags'][0]} — {payload['text'][:40]}...")
         else:
             log.write(f"[FAILED]  {i} — {payload['tags'][0]}\n")
 
