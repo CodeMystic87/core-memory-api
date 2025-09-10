@@ -1,23 +1,12 @@
 import json
 import requests
 from datetime import datetime
-import os
-import glob
 
 # ===== CONFIG =====
 CORE_MEMORY_API = "https://core-memory-api.onrender.com/storeMemory"
-INPUT_FILE = "core-memory-api/journal_with_tags_and_categories.jsonl"
+INPUT_FILE = "journal_with_tags_and_categories.jsonl"
 VERSION = "3.7a"
 TIMEZONE = "America/Phoenix"
-
-# ===== AUTO-FIX INPUT FILENAME =====
-if not os.path.exists(INPUT_FILE):
-    matches = glob.glob("journal_with_tags*.jsonl")
-    if matches:
-        os.rename(matches[0], INPUT_FILE)
-        print(f"✅ Auto-renamed {matches[0]} -> {INPUT_FILE}")
-    else:
-        raise FileNotFoundError("❌ Could not find journal_with_tags JSONL file")
 
 # ===== LOAD INPUT =====
 with open(INPUT_FILE, "r", encoding="utf-8") as f:
@@ -27,65 +16,49 @@ print(f"📥 Loaded {len(entries)} entries from {INPUT_FILE}")
 
 # ===== HELPERS =====
 def normalize_date(raw_date: str):
-    """
-    Convert input date string into ISO + friendly formats.
-    Expects YYYY-MM-DD, falls back if missing.
-    """
+    """Convert input date into ISO + friendly formats."""
     try:
         dt = datetime.strptime(raw_date, "%Y-%m-%d")
+        iso = dt.strftime("%Y-%m-%dT%H:%M:%S")
+        friendly = dt.strftime("%B %d, %Y")
+        return iso, friendly
     except Exception:
-        dt = datetime(2000, 1, 1)  # fallback default
-    return {
-        "iso": dt.strftime("%Y-%m-%dT00:00:00"),
-        "friendly": dt.strftime("%B %d, %Y")
-    }
+        now = datetime.now()
+        return now.isoformat(), now.strftime("%B %d, %Y")
 
-def build_payload(entry):
-    """Standardize entry into CoreMemory schema with tags + metadata."""
-    raw_date = entry.get("date") or "2000-01-01"
-    norm = normalize_date(raw_date)
+# ===== MIGRATION LOOP =====
+for idx, entry in enumerate(entries, 1):
+    raw_text = entry.get("text", "").strip()
+    raw_date = entry.get("date", "")
 
-    text = entry.get("text", "").strip()
-    if not text or len(text) < 5:
-        return None  # skip empty/too short
+    # Skip empty or too-short entries
+    if not raw_text or len(raw_text) < 5:
+        print(f"⏭️ Skipped {idx}/{len(entries)} (empty/too short)")
+        continue
 
-    return {
-        "text": text,
+    iso, friendly = normalize_date(raw_date)
+
+    # Build new normalized entry
+    new_entry = {
         "kind": "journal",
+        "text": raw_text,
         "tags": [
             f"date:{raw_date}",
-            f"date_friendly:{norm['friendly']}",
+            f"date_friendly:{friendly}",
             "type:journal"
         ],
         "meta": {
-            "datetime_iso": norm["iso"],
+            "datetime_iso": iso,
             "timezone": TIMEZONE,
             "version": VERSION
         }
     }
 
-# ===== UPLOAD =====
-success, skipped, failed = 0, 0, 0
-for i, e in enumerate(entries, 1):
-    payload = build_payload(e)
-    if not payload:
-        print(f"⏭️ Skipped entry {i} (empty/too short)")
-        skipped += 1
-        continue
-
     try:
-        r = requests.post(CORE_MEMORY_API, json=payload, timeout=10)
-        if r.status_code == 200:
-            print(f"✅ Saved {i}: {payload['tags'][0]} ... {payload['text'][:40]}...")
-            success += 1
+        res = requests.post(CORE_MEMORY_API, json=new_entry)
+        if res.status_code == 200:
+            print(f"✅ Migrated {idx}/{len(entries)} ({raw_date})")
         else:
-            print(f"❌ Failed {i}: {r.status_code} {r.text}")
-            failed += 1
-    except Exception as ex:
-        print(f"🔥 Error on {i}: {ex}")
-        failed += 1
-
-print("\n==== Migration Summary ====")
-print(f"✅ {success} saved")
-print(f"⏭️ {skipped} skipped")
-print(f"❌ {failed} failed")
+            print(f"❌ Error {res.status_code} on {idx}/{len(entries)}: {res.text}")
+    except Exception as e:
+        print(f"💥 Exception on {idx}/{len(entries)}: {e}")
